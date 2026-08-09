@@ -4,26 +4,26 @@
      
   <!-- version number is mayor.minor.zero.uxplayversion -->
   <Package
-    Id="uxplaywindows"
-    Name="uxplay-windows"
-    Manufacturer="leapbtw"
-    Version="2.1.0.1736"
-    UpgradeCode="00000eaf-dcca-458f-ab77-aaef11ce4ba8"
+    Id="uxplaystudio"
+    Name="UxPlay Studio"
+    Manufacturer="inspirezuza"
+    Version="1.0.0.0"
+    UpgradeCode="0b70ca8d-8078-4671-82d5-9bb4ed213133"
     Language="1033"
     Scope="perMachine">
 
     <MajorUpgrade
-      DowngradeErrorMessage="A newer version of uxplay-windows is already installed." />
+      DowngradeErrorMessage="A newer version of UxPlay Studio is already installed." />
     <WixVariable Id="WixUILicenseRtf" Value="./docs/LICENSE.rtf" />
     <MediaTemplate EmbedCab="yes" />
 
     <ui:WixUI Id="WixUI_FeatureTree" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="INSTALLDIR" Name="uxplay-windows" />
+      <Directory Id="INSTALLDIR" Name="UxPlay Studio" />
     </StandardDirectory>
 
-    <Feature Id="MainFeature" Title="uxplay-windows" Level="1">
+    <Feature Id="MainFeature" Title="UxPlay Studio" Level="1">
       <ComponentGroupRef Id="AppFiles" />
       <ComponentGroupRef Id="AppExe" />
       <ComponentRef Id="ProgramMenuShortcutComponent" />
@@ -39,15 +39,15 @@
 
     <ComponentGroup Id="AppFiles" Directory="INSTALLDIR">
       <Files Include="./release/**">
-        <Exclude Files="./release/uxplay-windows.exe;**/*.pdb;**/uxplay-windows.exe" />
+        <Exclude Files="./release/uxplay-studio.exe;**/*.pdb;**/uxplay-studio.exe" />
       </Files>
     </ComponentGroup>
 
     <ComponentGroup Id="AppExe" Directory="INSTALLDIR">
       <Component Id="AppExeComponent"
-                 Guid="e5f23b9b-b726-4738-85ba-63892cff1924">
+                 Guid="a94b7476-c43c-4a2f-a14e-1468505e29a3">
         <File Id="AppExeFile"
-              Source="./release/uxplay-windows.exe"
+              Source="./release/uxplay-studio.exe"
               KeyPath="yes" />
       </Component>
     </ComponentGroup>
@@ -56,37 +56,37 @@
     <StandardDirectory Id="ProgramMenuFolder" />
 
     <Component Id="ProgramMenuShortcutComponent"
-               Guid="cd347554-b38e-47f5-801d-152447366101"
+               Guid="900f4ca7-022e-4fde-9205-00cb56de07db"
                Directory="ProgramMenuFolder">
       <RegistryValue
         Root="HKCU"
-        Key="Software\leapbtw\uxplay-windows"
+        Key="Software\inspirezuza\UxPlayStudio"
         Name="ProgramMenuShortcut"
         Type="integer"
         Value="1"
         KeyPath="yes" />
       <Shortcut
-        Name="uxplay-windows"
+        Name="UxPlay Studio"
         Directory="ProgramMenuFolder"
-        Target="[INSTALLDIR]uxplay-windows.exe"
+        Target="[INSTALLDIR]uxplay-studio.exe"
         WorkingDirectory="INSTALLDIR"
         Advertise="no" />
     </Component>
 
     <Component Id="DesktopShortcutComponent"
-               Guid="63bb69df-4292-4053-848c-fb369bed6273"
+               Guid="c4a27d21-bebc-4d6c-8c8a-d12d176306be"
                Directory="DesktopFolder">
       <RegistryValue
         Root="HKCU"
-        Key="Software\leapbtw\uxplay-windows"
+        Key="Software\inspirezuza\UxPlayStudio"
         Name="DesktopShortcut"
         Type="integer"
         Value="1"
         KeyPath="yes" />
       <Shortcut
-        Name="uxplay-windows"
+        Name="UxPlay Studio"
         Directory="DesktopFolder"
-        Target="[INSTALLDIR]uxplay-windows.exe"
+        Target="[INSTALLDIR]uxplay-studio.exe"
         WorkingDirectory="INSTALLDIR"
         Advertise="no" />
     </Component>

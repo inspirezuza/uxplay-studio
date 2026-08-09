@@ -1,46 +1,64 @@
 #include "airplayworker.h"
+
 #include "uxplay_api.h"
+
+#include <QByteArray>
 #include <QDebug>
 #include <vector>
 
-AirPlayWorker::AirPlayWorker(QObject *parent) : QThread(parent) {}
+AirPlayWorker::AirPlayWorker(QObject *parent) : QThread(parent) {
+    qRegisterMetaType<ReceiverEvent>();
+}
 
-void AirPlayWorker::setArgs(const QStringList &args) {
-    m_args = args;
+void AirPlayWorker::configure(QStringList args, quintptr videoWindow) {
+    Q_ASSERT(!isRunning());
+    m_args = std::move(args);
+    m_videoWindow = videoWindow;
 }
 
 void AirPlayWorker::run() {
-    std::vector<QByteArray> argBytes;
-    std::vector<char *> argv;
-    
-    argBytes.push_back(QByteArray("uxplay"));
-    argv.push_back(argBytes.back().data());
-
-    for (const auto &arg : m_args) {
-        if (arg.trimmed().isEmpty()) continue;
-        argBytes.push_back(arg.toUtf8());
-        argv.push_back(argBytes.back().data());
-    }
-
-    qDebug() << "Starting UxPlay engine with arguments:" << m_args;
-    emit started();
-
-    int ret = 0;
-
-    // Loop con controllo di interruzione
-    while (!isInterruptionRequested()) {
-        ret = start_uxplay(static_cast<int>(argv.size()), argv.data());
-
-        // Se il processo termina, esci dal loop
-        if (ret != 0) {
-            emit errorOccurred(QString("Engine exited with code %1").arg(ret));
-            break;
+    std::vector<QByteArray> encodedArguments;
+    encodedArguments.reserve(static_cast<size_t>(m_args.size() + 1));
+    encodedArguments.emplace_back("uxplay-studio");
+    for (const QString &argument : m_args) {
+        if (!argument.trimmed().isEmpty()) {
+            encodedArguments.push_back(argument.toUtf8());
         }
     }
 
-    emit stopped();
+    // Build the pointer vector only after QByteArray storage is complete so a
+    // vector reallocation can never invalidate argv.
+    std::vector<char *> argv;
+    argv.reserve(encodedArguments.size());
+    for (QByteArray &argument : encodedArguments) {
+        argv.push_back(argument.data());
+    }
+
+    uxplay_set_video_window(static_cast<uintptr_t>(m_videoWindow));
+    uxplay_set_event_callback(&AirPlayWorker::eventCallback, this);
+    emit engineStarted();
+    const int exitCode = start_uxplay(static_cast<int>(argv.size()), argv.data());
+    uxplay_set_event_callback(nullptr, nullptr);
+    emit engineExited(exitCode);
 }
 
 void AirPlayWorker::stopAirplay() {
+    requestInterruption();
     stop_uxplay();
+}
+
+void AirPlayWorker::eventCallback(const uxplay_event *event, void *context) {
+    if (!event || !context) {
+        return;
+    }
+    auto *worker = static_cast<AirPlayWorker *>(context);
+    ReceiverEvent translated;
+    translated.type = static_cast<int>(event->type);
+    translated.deviceName = QString::fromUtf8(event->device_name ? event->device_name : "");
+    translated.deviceModel = QString::fromUtf8(event->device_model ? event->device_model : "");
+    translated.deviceId = QString::fromUtf8(event->device_id ? event->device_id : "");
+    translated.message = QString::fromUtf8(event->message ? event->message : "");
+    translated.width = event->width;
+    translated.height = event->height;
+    emit worker->receiverEvent(translated);
 }

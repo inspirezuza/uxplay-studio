@@ -1,608 +1,848 @@
 #include "mainwindow.h"
+
 #include "airplayworker.h"
 #include "mdns_responder.hpp"
-#include <windows.h>
-#include <winsvc.h>
+#include "networkdiagnostics.h"
+#include "receiverengine.h"
+#include "videosurface.h"
+#include "uxplay_api.h"
 
-#include <QProcess>
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QCloseEvent>
+#include <QComboBox>
+#include <QDateTime>
 #include <QDesktopServices>
-#include <QDebug>
 #include <QDir>
 #include <QFile>
-#include <QFileInfo>
+#include <QGuiApplication>
+#include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPlainTextEdit>
+#include <QProcess>
 #include <QPushButton>
-#include <QProcessEnvironment>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
+#include <QScrollArea>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QStackedWidget>
 #include <QStyle>
 #include <QSystemTrayIcon>
-#include <QComboBox>
+#include <QTextDocument>
+#include <QTextEdit>
 #include <QTimer>
-#include <QUrl>
 #include <QVBoxLayout>
-#include <QTextStream>
 
-struct RenameData {
-    DWORD pid;
-    QString newTitle;
-};
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
-// Callback method that Windows calls for every opened window
-BOOL CALLBACK EnumWindowsProcRename(HWND hwnd, LPARAM lParam) {
-    RenameData *data = reinterpret_cast<RenameData*>(lParam);
-    DWORD windowPid;
-    GetWindowThreadProcessId(hwnd, &windowPid);
-
-    if (windowPid == data->pid) {
-        char windowTitle[512];
-        if (GetWindowTextA(hwnd, windowTitle, sizeof(windowTitle))) {
-            QString title = QString::fromLocal8Bit(windowTitle);
-            
-            if (title.contains("Direct") && title.contains("enderer")) {
-                printf("found window to rename, setting new name...\n");
-                SetWindowTextW(hwnd, reinterpret_cast<const wchar_t*>(data->newTitle.utf16()));
-                return FALSE;
-            }
-        }
-    }
-    return TRUE;
+namespace {
+QLabel *mutedLabel(const QString &text, QWidget *parent = nullptr) {
+    auto *label = new QLabel(text, parent);
+    label->setObjectName(QStringLiteral("mutedLabel"));
+    label->setWordWrap(true);
+    return label;
 }
 
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
-    ensureSettingsFileExists();
-    setupTray();
-    setupUI();
+QWidget *card(QWidget *parent = nullptr) {
+    auto *widget = new QWidget(parent);
+    widget->setObjectName(QStringLiteral("card"));
+    return widget;
+}
 
-    // If Bonjour Service is missing, we must install it; otherwise we exit.
-    if (ensureBonjourServiceInstalled()) {
-        startServer();
-    } else {
-        m_quitting = true;
-        QTimer::singleShot(0, qApp, &QCoreApplication::quit);
-        return;
+QString formatDuration(qint64 seconds) {
+    const qint64 hours = seconds / 3600;
+    const qint64 minutes = (seconds % 3600) / 60;
+    const qint64 remaining = seconds % 60;
+    if (hours > 0) {
+        return QStringLiteral("%1:%2:%3")
+            .arg(hours, 2, 10, QLatin1Char('0'))
+            .arg(minutes, 2, 10, QLatin1Char('0'))
+            .arg(remaining, 2, 10, QLatin1Char('0'));
+    }
+    return QStringLiteral("%1:%2")
+        .arg(minutes, 2, 10, QLatin1Char('0'))
+        .arg(remaining, 2, 10, QLatin1Char('0'));
+}
+}
+
+MainWindow::MainWindow(QWidget *parent, bool autoStart)
+    : QMainWindow(parent), m_autoStart(autoStart) {
+    m_config = SettingsStore::load();
+    m_config.autostart = autostartEnabled();
+    m_engine = new ReceiverEngine(this);
+
+    setupUi();
+    setupTray();
+    loadConfigIntoControls();
+
+    connect(m_engine, &ReceiverEngine::stateChanged,
+            this, &MainWindow::handleStateChanged);
+    connect(m_engine, &ReceiverEngine::eventReceived,
+            this, &MainWindow::handleReceiverEvent);
+    connect(m_engine, &ReceiverEngine::recoveryScheduled, this, [this](int delayMs) {
+        appendActivity(QStringLiteral("Recovery"),
+                       QStringLiteral("Receiver will retry in %1 second(s).")
+                           .arg(delayMs / 1000));
+    });
+
+    auto *timer = new QTimer(this);
+    connect(timer, &QTimer::timeout, this, &MainWindow::updateSessionTimer);
+    timer->start(1000);
+
+    handleStateChanged(ReceiverState::Stopped);
+    refreshDiagnostics();
+    if (m_autoStart) {
+        QTimer::singleShot(0, this, &MainWindow::startReceiver);
     }
 }
 
 MainWindow::~MainWindow() {
     m_quitting = true;
-    stopServer();
+    stopBluetoothBeacon();
 }
 
-QString MainWindow::userArgumentsPath() const {
-    QString appDataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    return appDataPath + "/arguments.txt";
-}
-
-QString MainWindow::machineArgumentsPath() const {
-    QString programDataPath =
-        QProcessEnvironment::systemEnvironment().value("ProgramData");
-    if (programDataPath.isEmpty()) {
-        programDataPath = "C:/ProgramData";
-    }
-    return programDataPath + "/uxplay-windows/arguments.txt";
-}
-
-QString MainWindow::activeArgumentsPath() const {
-    QString machinePath = machineArgumentsPath();
-    if (QFile::exists(machinePath)) {
-        return machinePath;
-    }
-
-    return userArgumentsPath();
-}
-
-QString MainWindow::expandEnvironmentVariables(const QString &content) const {
-    QString expanded = content;
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-
-    for (const QString &key : env.keys()) {
-        expanded.replace("%" + key + "%", env.value(key), Qt::CaseInsensitive);
-    }
-
-    return expanded;
-}
-
-void MainWindow::ensureSettingsFileExists() {
-    if (QFile::exists(userArgumentsPath()) || QFile::exists(machineArgumentsPath())) {
-        return;
-    }
-
-    QFileInfo info(userArgumentsPath());
-    QDir().mkpath(info.absolutePath());
-
-    QFile file(userArgumentsPath());
-    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QTextStream out(&file);
-        out << "-n uxplay-windows -nh";
-        file.close();
-    }
-}
-
-QStringList MainWindow::getArgumentsFromFile() {
-    const QString userPath = userArgumentsPath();
-    const QString machinePath = machineArgumentsPath();
-    const QString selectedPath = activeArgumentsPath();
-
-    qInfo().noquote() << "[arguments] Machine file:"
-                      << QDir::toNativeSeparators(machinePath)
-                      << (QFile::exists(machinePath) ? "(found)" : "(not found)");
-    qInfo().noquote() << "[arguments] User file:"
-                      << QDir::toNativeSeparators(userPath)
-                      << (QFile::exists(userPath) ? "(found)" : "(not found)");
-    qInfo().noquote() << "[arguments] Reading:"
-                      << QDir::toNativeSeparators(selectedPath);
-
-    QFile file(selectedPath);
-    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        QString content = expandEnvironmentVariables(QTextStream(&file).readAll().trimmed());
-        file.close();
-        return QProcess::splitCommand(content);
-    }
-
-    qWarning().noquote()
-        << "[arguments] Unable to read the selected file; using built-in defaults.";
-    return QStringList() << "-n" << "uxplay-windows" << "-nh";
-}
-
-void MainWindow::setupUI() {
-    setWindowTitle("uxplay-windows");
-    setWindowIcon(QApplication::windowIcon());
-    setFixedSize(300, 260);
+void MainWindow::setupUi() {
+    setWindowTitle(QStringLiteral("UxPlay Studio"));
+    setMinimumSize(960, 640);
+    resize(1240, 780);
 
     auto *central = new QWidget(this);
+    central->setObjectName(QStringLiteral("appRoot"));
     setCentralWidget(central);
-    auto *layout = new QVBoxLayout(central);
+    auto *shell = new QHBoxLayout(central);
+    shell->setContentsMargins(0, 0, 0, 0);
+    shell->setSpacing(0);
 
-    m_statusLabel = new QLabel("Initializing...", this);
-    m_statusLabel->setAlignment(Qt::AlignCenter);
-    layout->addWidget(m_statusLabel);
+    m_sidebar = new QWidget(central);
+    m_sidebar->setObjectName(QStringLiteral("sidebar"));
+    m_sidebar->setFixedWidth(224);
+    auto *sidebarLayout = new QVBoxLayout(m_sidebar);
+    sidebarLayout->setContentsMargins(22, 26, 22, 22);
+    sidebarLayout->setSpacing(8);
 
-    // Bluetooth Discovery Checkbox
-    m_bleCheckbox = new QCheckBox("Enable Bluetooth Discovery", this);
-    QSettings settings;
-    m_bleCheckbox->setChecked(settings.value("ble_enabled", true).toBool());
-    connect(m_bleCheckbox, &QCheckBox::toggled, this, &MainWindow::toggleBle);
-    layout->addWidget(m_bleCheckbox);
+    auto *brand = new QLabel(QStringLiteral("UXPLAY\nSTUDIO"), m_sidebar);
+    brand->setObjectName(QStringLiteral("brand"));
+    sidebarLayout->addWidget(brand);
+    m_sidebarReceiver = mutedLabel(m_config.receiverName, m_sidebar);
+    sidebarLayout->addWidget(m_sidebarReceiver);
+    sidebarLayout->addSpacing(24);
 
-    m_autostartCheckbox = new QCheckBox("Open uxplay-windows at login", this);
-    m_autostartCheckbox->setChecked(isAutostartEnabled());
-    connect(m_autostartCheckbox, &QCheckBox::toggled,
-            this, &MainWindow::toggleAutostart);
-    layout->addWidget(m_autostartCheckbox);
+    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Player"), 0));
+    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Activity"), 1));
+    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Settings"), 2));
+    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Diagnostics"), 3));
+    sidebarLayout->addStretch();
 
-    // Force Fullscreen Checkbox
-    m_fullscreenCheckbox = new QCheckBox("Force Fullscreen (must select renderer)", this);
-    m_fullscreenCheckbox->setChecked(
-        settings.value("force_fs_enabled", false).toBool()
-    );
-    connect(m_fullscreenCheckbox, &QCheckBox::toggled, this,
-            &MainWindow::toggleForceFullscreen);
-    layout->addWidget(m_fullscreenCheckbox);
+    auto *opensource = mutedLabel(
+        QStringLiteral("Open source · GPL-3.0\nPowered by UxPlay + GStreamer"), m_sidebar);
+    opensource->setObjectName(QStringLiteral("sidebarFooter"));
+    sidebarLayout->addWidget(opensource);
+    shell->addWidget(m_sidebar);
 
-    // Renderer dropdown
-    m_rendererCombo = new QComboBox(this);
-    m_rendererCombo->addItem("Video Renderer (Auto)", "auto");
-    m_rendererCombo->addItem("D3D11", "d3d11");
-    m_rendererCombo->addItem("D3D12", "d3d12");
+    auto *content = new QWidget(central);
+    content->setObjectName(QStringLiteral("content"));
+    auto *contentLayout = new QVBoxLayout(content);
+    contentLayout->setContentsMargins(0, 0, 0, 0);
+    contentLayout->setSpacing(0);
 
-    {
-        QString saved = settings.value("renderer_mode", "auto").toString();
-        int idx = m_rendererCombo->findData(saved);
-        if (idx >= 0) m_rendererCombo->setCurrentIndex(idx);
+    m_header = new QWidget(content);
+    m_header->setObjectName(QStringLiteral("header"));
+    m_header->setFixedHeight(84);
+    auto *headerLayout = new QHBoxLayout(m_header);
+    headerLayout->setContentsMargins(30, 18, 30, 18);
+    m_pageTitle = new QLabel(QStringLiteral("Player"), m_header);
+    m_pageTitle->setObjectName(QStringLiteral("pageTitle"));
+    headerLayout->addWidget(m_pageTitle);
+    headerLayout->addStretch();
+    m_statusBadge = new QLabel(QStringLiteral("Stopped"), m_header);
+    m_statusBadge->setObjectName(QStringLiteral("statusBadge"));
+    headerLayout->addWidget(m_statusBadge);
+    m_receiverToggle = new QPushButton(QStringLiteral("Start receiver"), m_header);
+    m_receiverToggle->setObjectName(QStringLiteral("primaryButton"));
+    connect(m_receiverToggle, &QPushButton::clicked, this, &MainWindow::toggleReceiver);
+    headerLayout->addWidget(m_receiverToggle);
+    contentLayout->addWidget(m_header);
+
+    m_pages = new QStackedWidget(content);
+    m_pages->addWidget(createPlayerPage());
+    m_pages->addWidget(createActivityPage());
+    m_pages->addWidget(createSettingsPage());
+    m_pages->addWidget(createDiagnosticsPage());
+    contentLayout->addWidget(m_pages, 1);
+    shell->addWidget(content, 1);
+    selectPage(0);
+}
+
+QPushButton *MainWindow::createNavigationButton(const QString &text, int page) {
+    auto *button = new QPushButton(text, m_sidebar);
+    button->setObjectName(QStringLiteral("navButton"));
+    button->setCheckable(true);
+    button->setCursor(Qt::PointingHandCursor);
+    connect(button, &QPushButton::clicked, this, [this, page]() { selectPage(page); });
+    m_navigationButtons.append(button);
+    return button;
+}
+
+void MainWindow::selectPage(int page) {
+    if (!m_pages || page < 0 || page >= m_pages->count()) {
+        return;
     }
+    static const QStringList titles {
+        QStringLiteral("Player"), QStringLiteral("Activity"),
+        QStringLiteral("Settings"), QStringLiteral("Diagnostics")
+    };
+    m_pages->setCurrentIndex(page);
+    m_pageTitle->setText(titles.value(page));
+    for (int index = 0; index < m_navigationButtons.size(); ++index) {
+        m_navigationButtons[index]->setChecked(index == page);
+    }
+    if (page == 3) {
+        refreshDiagnostics();
+    }
+}
 
-    connect(m_rendererCombo,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &MainWindow::onRendererChanged);
+QWidget *MainWindow::createPlayerPage() {
+    auto *page = new QWidget(this);
+    page->setObjectName(QStringLiteral("page"));
+    auto *layout = new QHBoxLayout(page);
+    layout->setContentsMargins(30, 24, 30, 30);
+    layout->setSpacing(20);
 
-    layout->addWidget(m_rendererCombo);
+    auto *playerCard = card(page);
+    auto *playerLayout = new QVBoxLayout(playerCard);
+    playerLayout->setContentsMargins(18, 18, 18, 16);
+    playerLayout->setSpacing(14);
+    auto *titleRow = new QHBoxLayout();
+    auto *title = new QLabel(QStringLiteral("Live screen"), playerCard);
+    title->setObjectName(QStringLiteral("cardTitle"));
+    titleRow->addWidget(title);
+    titleRow->addStretch();
+    auto *embedded = new QLabel(QStringLiteral("EMBEDDED · D3D11"), playerCard);
+    embedded->setObjectName(QStringLiteral("miniBadge"));
+    titleRow->addWidget(embedded);
+    playerLayout->addLayout(titleRow);
 
+    m_videoSurface = new VideoSurface(playerCard);
+    playerLayout->addWidget(m_videoSurface, 1);
 
-    m_settingsBtn = new QPushButton("Edit UxPlay Arguments (Advanced)", this);
-    connect(m_settingsBtn, &QPushButton::clicked, this, &MainWindow::openSettingsFile);
-    layout->addWidget(m_settingsBtn);
+    auto *controls = new QHBoxLayout();
+    auto *hint = mutedLabel(QStringLiteral("F11 fullscreen · Esc to return"), playerCard);
+    controls->addWidget(hint);
+    controls->addStretch();
+    auto *restart = new QPushButton(QStringLiteral("Restart receiver"), playerCard);
+    restart->setObjectName(QStringLiteral("secondaryButton"));
+    connect(restart, &QPushButton::clicked, this, &MainWindow::restartReceiver);
+    controls->addWidget(restart);
+    m_fullscreenButton = new QPushButton(QStringLiteral("Fullscreen"), playerCard);
+    m_fullscreenButton->setObjectName(QStringLiteral("secondaryButton"));
+    connect(m_fullscreenButton, &QPushButton::clicked, this, &MainWindow::enterFullscreen);
+    controls->addWidget(m_fullscreenButton);
+    playerLayout->addLayout(controls);
+    layout->addWidget(playerCard, 1);
 
-    m_listargsBtn = new QPushButton("List UxPlay arguments", this);
-    connect(m_listargsBtn, &QPushButton::clicked, this, &MainWindow::openListArgsFile);
-    layout->addWidget(m_listargsBtn);
+    m_sessionPanel = card(page);
+    m_sessionPanel->setFixedWidth(286);
+    auto *sessionLayout = new QVBoxLayout(m_sessionPanel);
+    sessionLayout->setContentsMargins(22, 22, 22, 22);
+    sessionLayout->setSpacing(9);
+    auto *sessionTitle = new QLabel(QStringLiteral("Session"), m_sessionPanel);
+    sessionTitle->setObjectName(QStringLiteral("cardTitle"));
+    sessionLayout->addWidget(sessionTitle);
+    m_sessionState = new QLabel(QStringLiteral("Receiver stopped"), m_sessionPanel);
+    m_sessionState->setObjectName(QStringLiteral("sessionHero"));
+    m_sessionState->setWordWrap(true);
+    sessionLayout->addWidget(m_sessionState);
+    sessionLayout->addSpacing(12);
 
-    m_licenseBtn = new QPushButton("License Information", this);
-    connect(m_licenseBtn, &QPushButton::clicked, this, &MainWindow::showLicense);
-    layout->addWidget(m_licenseBtn);
+    sessionLayout->addWidget(mutedLabel(QStringLiteral("DEVICE"), m_sessionPanel));
+    m_deviceName = new QLabel(QStringLiteral("—"), m_sessionPanel);
+    m_deviceName->setObjectName(QStringLiteral("valueLabel"));
+    m_deviceName->setWordWrap(true);
+    sessionLayout->addWidget(m_deviceName);
+    m_deviceModel = mutedLabel(QStringLiteral("Waiting for a connection"), m_sessionPanel);
+    sessionLayout->addWidget(m_deviceModel);
+    sessionLayout->addSpacing(8);
 
+    sessionLayout->addWidget(mutedLabel(QStringLiteral("STREAM"), m_sessionPanel));
+    m_resolution = new QLabel(QStringLiteral("—"), m_sessionPanel);
+    m_resolution->setObjectName(QStringLiteral("valueLabel"));
+    sessionLayout->addWidget(m_resolution);
+    m_duration = mutedLabel(QStringLiteral("00:00"), m_sessionPanel);
+    sessionLayout->addWidget(m_duration);
+    sessionLayout->addSpacing(8);
+
+    sessionLayout->addWidget(mutedLabel(QStringLiteral("NETWORK"), m_sessionPanel));
+    m_networkAddress = new QLabel(NetworkDiagnostics::primaryAddress(), m_sessionPanel);
+    m_networkAddress->setObjectName(QStringLiteral("valueLabel"));
+    sessionLayout->addWidget(m_networkAddress);
+    m_securitySummary = mutedLabel({}, m_sessionPanel);
+    sessionLayout->addWidget(m_securitySummary);
+    sessionLayout->addStretch();
+
+    auto *openSettings = new QPushButton(QStringLiteral("Open settings"), m_sessionPanel);
+    openSettings->setObjectName(QStringLiteral("secondaryButton"));
+    connect(openSettings, &QPushButton::clicked, this, [this]() { selectPage(2); });
+    sessionLayout->addWidget(openSettings);
+    layout->addWidget(m_sessionPanel);
+    return page;
+}
+
+QWidget *MainWindow::createActivityPage() {
+    auto *page = new QWidget(this);
+    page->setObjectName(QStringLiteral("page"));
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(30, 24, 30, 30);
+    layout->setSpacing(14);
+
+    auto *intro = mutedLabel(
+        QStringLiteral("Connection events and recovery information stay local to this PC."), page);
+    layout->addWidget(intro);
+    auto *logCard = card(page);
+    auto *logLayout = new QVBoxLayout(logCard);
+    logLayout->setContentsMargins(18, 18, 18, 18);
+    auto *actions = new QHBoxLayout();
+    auto *title = new QLabel(QStringLiteral("Recent activity"), logCard);
+    title->setObjectName(QStringLiteral("cardTitle"));
+    actions->addWidget(title);
+    actions->addStretch();
+    auto *copy = new QPushButton(QStringLiteral("Copy"), logCard);
+    copy->setObjectName(QStringLiteral("secondaryButton"));
+    connect(copy, &QPushButton::clicked, this, [this]() {
+        if (m_activityLog) m_activityLog->selectAll(), m_activityLog->copy();
+    });
+    actions->addWidget(copy);
+    auto *clear = new QPushButton(QStringLiteral("Clear"), logCard);
+    clear->setObjectName(QStringLiteral("secondaryButton"));
+    connect(clear, &QPushButton::clicked, this, [this]() {
+        if (m_activityLog) m_activityLog->clear();
+    });
+    actions->addWidget(clear);
+    logLayout->addLayout(actions);
+    m_activityLog = new QTextEdit(logCard);
+    m_activityLog->setObjectName(QStringLiteral("activityLog"));
+    m_activityLog->setReadOnly(true);
+    m_activityLog->document()->setMaximumBlockCount(600);
+    logLayout->addWidget(m_activityLog, 1);
+    layout->addWidget(logCard, 1);
+    return page;
+}
+
+QWidget *MainWindow::createSettingsPage() {
+    auto *page = new QWidget(this);
+    page->setObjectName(QStringLiteral("page"));
+    auto *outer = new QVBoxLayout(page);
+    outer->setContentsMargins(0, 0, 0, 0);
+    auto *scroll = new QScrollArea(page);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setObjectName(QStringLiteral("settingsScroll"));
+    auto *container = new QWidget(scroll);
+    container->setObjectName(QStringLiteral("page"));
+    auto *layout = new QVBoxLayout(container);
+    layout->setContentsMargins(30, 24, 30, 30);
+    layout->setSpacing(16);
+
+    auto *receiverCard = card(container);
+    auto *receiverLayout = new QVBoxLayout(receiverCard);
+    receiverLayout->setContentsMargins(22, 22, 22, 22);
+    receiverLayout->addWidget(new QLabel(QStringLiteral("Receiver"), receiverCard));
+    receiverLayout->addWidget(mutedLabel(
+        QStringLiteral("This is the name shown in iPad Screen Mirroring."), receiverCard));
+    m_receiverNameEdit = new QLineEdit(receiverCard);
+    m_receiverNameEdit->setMaxLength(48);
+    m_receiverNameEdit->setPlaceholderText(QStringLiteral("UxPlay Studio"));
+    receiverLayout->addWidget(m_receiverNameEdit);
+    receiverLayout->addSpacing(8);
+    receiverLayout->addWidget(mutedLabel(QStringLiteral("QUALITY PROFILE"), receiverCard));
+    m_qualityCombo = new QComboBox(receiverCard);
+    m_qualityCombo->addItem(QStringLiteral("Balanced · 1080p 60 FPS"),
+                            static_cast<int>(QualityProfile::Balanced1080p60));
+    m_qualityCombo->addItem(QStringLiteral("Efficient · 720p 30 FPS"),
+                            static_cast<int>(QualityProfile::Efficient720p30));
+    m_qualityCombo->addItem(QStringLiteral("Low latency · 1080p 60 FPS"),
+                            static_cast<int>(QualityProfile::LowLatency1080p60));
+    receiverLayout->addWidget(m_qualityCombo);
+    receiverLayout->addWidget(mutedLabel(
+        QStringLiteral("Video always uses the embedded D3D11 renderer so it cannot open a separate window."),
+        receiverCard));
+    layout->addWidget(receiverCard);
+
+    auto *securityCard = card(container);
+    auto *securityLayout = new QVBoxLayout(securityCard);
+    securityLayout->setContentsMargins(22, 22, 22, 22);
+    securityLayout->addWidget(new QLabel(QStringLiteral("Shared Wi-Fi protection"), securityCard));
+    securityLayout->addWidget(mutedLabel(
+        QStringLiteral("A PIN is recommended on dorm, office, or other shared networks."), securityCard));
+    m_pinEnabledCheck = new QCheckBox(QStringLiteral("Require a four-digit AirPlay PIN"), securityCard);
+    securityLayout->addWidget(m_pinEnabledCheck);
+    m_pinEdit = new QLineEdit(securityCard);
+    m_pinEdit->setMaxLength(4);
+    m_pinEdit->setValidator(new QRegularExpressionValidator(
+        QRegularExpression(QStringLiteral("[0-9]{4}")), m_pinEdit));
+    m_pinEdit->setPlaceholderText(QStringLiteral("2468"));
+    securityLayout->addWidget(m_pinEdit);
+    connect(m_pinEnabledCheck, &QCheckBox::toggled, m_pinEdit, &QWidget::setEnabled);
+    layout->addWidget(securityCard);
+
+    auto *appCard = card(container);
+    auto *appLayout = new QVBoxLayout(appCard);
+    appLayout->setContentsMargins(22, 22, 22, 22);
+    appLayout->addWidget(new QLabel(QStringLiteral("App behavior"), appCard));
+    m_bluetoothCheck = new QCheckBox(QStringLiteral("Enable Bluetooth discovery fallback"), appCard);
+    m_autostartCheck = new QCheckBox(QStringLiteral("Start UxPlay Studio when I sign in"), appCard);
+    m_notificationsCheck = new QCheckBox(QStringLiteral("Show connection notifications"), appCard);
+    appLayout->addWidget(m_bluetoothCheck);
+    appLayout->addWidget(m_autostartCheck);
+    appLayout->addWidget(m_notificationsCheck);
+    layout->addWidget(appCard);
+
+    auto *saveRow = new QHBoxLayout();
+    m_settingsFeedback = mutedLabel({}, container);
+    saveRow->addWidget(m_settingsFeedback, 1);
+    auto *save = new QPushButton(QStringLiteral("Save & restart receiver"), container);
+    save->setObjectName(QStringLiteral("primaryButton"));
+    connect(save, &QPushButton::clicked, this, &MainWindow::saveSettings);
+    saveRow->addWidget(save);
+    layout->addLayout(saveRow);
     layout->addStretch();
-    updateStatus();
+    scroll->setWidget(container);
+    outer->addWidget(scroll);
+    return page;
 }
 
-void MainWindow::openSettingsFile() {
-    QString filePath = activeArgumentsPath();
-    QDesktopServices::openUrl(QUrl::fromLocalFile(filePath));
-    
-    m_tray->showMessage("Settings", "Restart the app to apply new arguments.", 
-                        QSystemTrayIcon::Information, 3000);
-}
-
-void MainWindow::openListArgsFile() {
-    QString filePath = QApplication::applicationDirPath() + "/resources/uxplay_arguments_list.txt";
-    QFile::setPermissions(filePath, QFile::ReadOwner | QFile::ReadGroup | QFile::ReadOther);
-    QDesktopServices::openUrl(QUrl::fromLocalFile(filePath));
+QWidget *MainWindow::createDiagnosticsPage() {
+    auto *page = new QWidget(this);
+    page->setObjectName(QStringLiteral("page"));
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(30, 24, 30, 30);
+    layout->setSpacing(14);
+    auto *intro = mutedLabel(
+        QStringLiteral("Use this report when discovery or rendering does not work. It contains no passwords."), page);
+    layout->addWidget(intro);
+    auto *diagnosticCard = card(page);
+    auto *diagnosticLayout = new QVBoxLayout(diagnosticCard);
+    diagnosticLayout->setContentsMargins(18, 18, 18, 18);
+    auto *row = new QHBoxLayout();
+    auto *title = new QLabel(QStringLiteral("System report"), diagnosticCard);
+    title->setObjectName(QStringLiteral("cardTitle"));
+    row->addWidget(title);
+    row->addStretch();
+    auto *refresh = new QPushButton(QStringLiteral("Refresh"), diagnosticCard);
+    refresh->setObjectName(QStringLiteral("secondaryButton"));
+    connect(refresh, &QPushButton::clicked, this, &MainWindow::refreshDiagnostics);
+    row->addWidget(refresh);
+    auto *copy = new QPushButton(QStringLiteral("Copy report"), diagnosticCard);
+    copy->setObjectName(QStringLiteral("secondaryButton"));
+    connect(copy, &QPushButton::clicked, this, [this]() {
+        if (m_diagnostics) m_diagnostics->selectAll(), m_diagnostics->copy();
+    });
+    row->addWidget(copy);
+    diagnosticLayout->addLayout(row);
+    m_diagnostics = new QPlainTextEdit(diagnosticCard);
+    m_diagnostics->setReadOnly(true);
+    m_diagnostics->setObjectName(QStringLiteral("diagnosticsText"));
+    diagnosticLayout->addWidget(m_diagnostics, 1);
+    layout->addWidget(diagnosticCard, 1);
+    return page;
 }
 
 void MainWindow::setupTray() {
-    m_tray = new QSystemTrayIcon(this);
-    QIcon trayIcon;
-    QString icoPath = QApplication::applicationDirPath() + "/resources/icon.ico";
-    trayIcon = QIcon(icoPath);
-    if (trayIcon.isNull()) {
-        trayIcon = QApplication::style()->standardIcon(QStyle::SP_MediaPlay);
+    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+        return;
     }
-    m_tray->setIcon(trayIcon);
-    m_tray->setToolTip("uxplay-windows");
-
-    m_trayMenu = new QMenu(this);
-    m_trayMenu->addAction("Quit", this, &MainWindow::quit);
-    m_trayMenu->addAction("Restart", this, &MainWindow::restartApplication);
-
-    m_tray->setContextMenu(m_trayMenu);
-    
-    connect(m_tray, &QSystemTrayIcon::activated, this, &MainWindow::onTrayActivated);
+    m_tray = new QSystemTrayIcon(windowIcon(), this);
+    if (m_tray->icon().isNull()) {
+        m_tray->setIcon(style()->standardIcon(QStyle::SP_ComputerIcon));
+    }
+    m_tray->setToolTip(QStringLiteral("UxPlay Studio"));
+    auto *menu = new QMenu(this);
+    menu->addAction(QStringLiteral("Open UxPlay Studio"), this, &MainWindow::showFromTray);
+    m_trayReceiverAction = menu->addAction(QStringLiteral("Start receiver"), this,
+                                            &MainWindow::toggleReceiver);
+    menu->addAction(QStringLiteral("Restart receiver"), this, &MainWindow::restartReceiver);
+    menu->addSeparator();
+    menu->addAction(QStringLiteral("Quit"), this, &MainWindow::quitApplication);
+    m_tray->setContextMenu(menu);
+    connect(m_tray, &QSystemTrayIcon::activated, this,
+            [this](QSystemTrayIcon::ActivationReason reason) {
+                if (reason == QSystemTrayIcon::Trigger ||
+                    reason == QSystemTrayIcon::DoubleClick) {
+                    showFromTray();
+                }
+            });
     m_tray->show();
 }
 
-void MainWindow::onTrayActivated(QSystemTrayIcon::ActivationReason reason) {
-    if (reason == QSystemTrayIcon::Trigger) {
-        isVisible() ? hide() : showNormal();
-    }
-}
-
-void MainWindow::toggleBle(bool checked) {
-    QSettings settings;
-    
-    if (settings.value("ble_enabled").toBool() == checked) {
+void MainWindow::startReceiver() {
+    if (m_engine->isRunning()) {
         return;
     }
-
-    settings.setValue("ble_enabled", checked);
-    
-    m_tray->showMessage("uxplay-windows", "Please restart the uxplay-windows to apply changes.\n(Right-click the Tray Icon)", 
-                        QSystemTrayIcon::Information, 3000);
-}
-
-void MainWindow::toggleForceFullscreen(bool checked) {
-    QSettings settings;
-    if (settings.value("force_fs_enabled").toBool() == checked) {
+    if (!ensureBonjourAvailable()) {
+        handleStateChanged(ReceiverState::Error);
+        m_videoSurface->setPlaceholderText(
+            QStringLiteral("Bonjour is not available"),
+            QStringLiteral("Open Diagnostics for discovery details, then start the receiver again."));
+        appendActivity(QStringLiteral("Error"),
+                       QStringLiteral("Bonjour Service is required for AirPlay discovery."));
         return;
     }
-
-    settings.setValue("force_fs_enabled", checked);
-    m_tray->showMessage("uxplay-windows", "Please restart the uxplay-windows to apply changes.\n(Right-click the Tray Icon)", 
-                        QSystemTrayIcon::Information, 3000);
+    startBluetoothBeacon();
+    appendActivity(QStringLiteral("Receiver"), QStringLiteral("Starting receiver…"));
+    m_engine->start(m_config, m_videoSurface->nativeHandle(), bleStatusPath());
 }
 
-void MainWindow::onRendererChanged(int /*index*/) {
-    if (!m_rendererCombo) return;
-
-    QString mode = m_rendererCombo->currentData().toString();
-
-    QSettings settings;
-    QString saved = settings.value("renderer_mode", "auto").toString();
-    if (saved == mode) return;
-
-    settings.setValue("renderer_mode", mode);
-    m_tray->showMessage("uxplay-windows", "Please restart the uxplay-windows to apply changes.\n(Right-click the Tray Icon)", 
-                        QSystemTrayIcon::Information, 3000);
-}
-
-void MainWindow::applyRendererAndFullscreenArgs(QStringList &args) {
-    while (true) {
-        int idx = args.indexOf("-fs");
-        if (idx < 0) break;
-        args.removeAt(idx);
-    }
-    if (m_fullscreenCheckbox && m_fullscreenCheckbox->isChecked()) {
-        args << "-fs";
-    }
-
-    // Remove existing "-vs <sink>" pairs
-    for (int i = 0; i < args.size();) {
-        if (args[i] == "-vs") {
-            args.removeAt(i); // -vs
-            if (i < args.size()) {
-                args.removeAt(i); // sink
-            }
-            continue;
-        }
-        ++i;
-    }
-
-    QString mode = "auto";
-    if (m_rendererCombo) {
-        mode = m_rendererCombo->currentData().toString();
-    }
-
-    if (mode == "d3d11") {
-        args << "-vs" << "d3d11videosink";
-    } else if (mode == "d3d12") {
-        args << "-vs" << "d3d12videosink";
-    }
-}
-
-void MainWindow::startServer() {
-    if (m_worker && m_worker->isRunning()) return;
-
-    QString appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    QDir().mkpath(appData);
-    
-    QStringList args = getArgumentsFromFile();
-    
-    int bleIdx = args.indexOf("-ble");
-    if (bleIdx != -1) {
-        args.removeAt(bleIdx);
-        if (bleIdx < args.size() && !args[bleIdx].startsWith("-")) {
-            args.removeAt(bleIdx);
-        }
-    }
-
-    applyRendererAndFullscreenArgs(args);
-
-    // Only add -ble and start beacon if checkbox is checked
-    if (!m_bleCheckbox) return;
-    if (m_bleCheckbox->isChecked()) {
-        QString bleFilePath = QDir::toNativeSeparators(appData + "/uxplay_status.ble");
-        args << "-ble" << bleFilePath;
-        startBluetoothBeacon
-    (bleFilePath);
-    } else {
-        stopBluetoothBeacon();
-    }
-
-    m_worker = new AirPlayWorker(this);
-    m_worker->setArgs(args);
-
-    connect(m_worker, &AirPlayWorker::started, this, &MainWindow::onAirplayStarted);
-    connect(m_worker, &AirPlayWorker::stopped, this, &MainWindow::onAirplayStopped);
-    connect(m_worker, &AirPlayWorker::finished, m_worker, &QObject::deleteLater);
-
-    m_worker->start();
-}
-
-void MainWindow::stopServer() {
+void MainWindow::stopReceiver() {
     stopBluetoothBeacon();
-    if (m_worker) {
-        m_worker->disconnect();
-        if (m_worker->isRunning()) {
-            QMetaObject::invokeMethod(m_worker, &AirPlayWorker::stopAirplay, Qt::QueuedConnection);
-            if (!m_worker->wait(1000)) {
-                m_worker->terminate();
-            }
-        }
-        m_worker = nullptr;
-    }
-    m_running = false;
-    updateStatus();
+    appendActivity(QStringLiteral("Receiver"), QStringLiteral("Stopping receiver…"));
+    m_engine->stop();
 }
 
-
-void MainWindow::onAirplayStarted() {
-    m_running = true;
-    updateStatus();
-
-    printf("onAirplayStarted()!\n");
-
-    // Only explicitly selected Direct3D sinks are known to support Alt+Enter.
-    // Leave automatically selected GStreamer sink windows unchanged.
-    if (!m_rendererCombo ||
-        m_rendererCombo->currentData().toString() == "auto") {
+void MainWindow::restartReceiver() {
+    if (!ensureBonjourAvailable()) {
         return;
     }
-
-    // Rename the video window when it pops up.
-    QTimer *monitorTimer = new QTimer(this);
-    connect(monitorTimer, &QTimer::timeout, this, [this, monitorTimer]() {
-        if (!m_running) {
-            monitorTimer->stop();
-            monitorTimer->deleteLater();
-            return;
-        }
-
-        RenameData info;
-        info.pid = GetCurrentProcessId();
-        info.newTitle = "AirPlay Video Stream (ALT+ENTER for Fullscreen)"; 
-
-        EnumWindows(EnumWindowsProcRename, reinterpret_cast<LPARAM>(&info));
-    });
-    monitorTimer->start(5000);
-
+    stopBluetoothBeacon();
+    startBluetoothBeacon();
+    appendActivity(QStringLiteral("Receiver"), QStringLiteral("Restarting receiver…"));
+    m_engine->restart(m_config, m_videoSurface->nativeHandle(), bleStatusPath());
 }
 
-void MainWindow::onAirplayStopped() {
-    m_running = false;
-    updateStatus();
-    
-    if (!m_quitting) {
-        qDebug() << "Session ended, restarting server to stay ready...";
-        QTimer::singleShot(1000, this, &MainWindow::startServer);
-    }
-}
-
-void MainWindow::onAirplayError(const QString &message) {
-    m_tray->showMessage("uxplay-windows", message, QSystemTrayIcon::Warning, 3000);
-}
-
-void MainWindow::toggleAutostart(bool checked) {
-    setAutostart(checked);
-    updateStatus();
-}
-
-bool MainWindow::isAutostartEnabled() const {
-    QSettings reg("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", QSettings::NativeFormat);
-    return reg.contains("uxplay-windows");
-}
-
-void MainWindow::setAutostart(bool enabled) {
-    QSettings reg("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", QSettings::NativeFormat);
-    if (enabled) {
-        QString path = QDir::toNativeSeparators(QApplication::applicationFilePath());
-        reg.setValue("uxplay-windows", "\"" + path + "\"");
+void MainWindow::toggleReceiver() {
+    if (m_engine->isRunning()) {
+        stopReceiver();
     } else {
-        reg.remove("uxplay-windows");
+        startReceiver();
     }
 }
 
-void MainWindow::startBluetoothBeacon(const QString &path) {
-    if (m_beacon && m_beacon->state() != QProcess::NotRunning)
-        return;
-
-    QString exe = QApplication::applicationDirPath() + "/uxplay-bluetooth-beacon.exe";
-    if (!QFile::exists(exe)) {
-        qDebug() << "uxplay-bluetooth-beacon.exe not found";
-        return;
+void MainWindow::handleStateChanged(ReceiverState state) {
+    const QString color = receiverStateColor(state);
+    m_statusBadge->setText(receiverStateLabel(state));
+    m_statusBadge->setStyleSheet(QStringLiteral(
+        "QLabel { color: %1; background: %1; background-color: rgba(255,255,255,0.06);"
+        " border: 1px solid %1; border-radius: 12px; padding: 5px 10px; }").arg(color));
+    const bool running = state != ReceiverState::Stopped;
+    m_receiverToggle->setText(running ? QStringLiteral("Stop receiver")
+                                      : QStringLiteral("Start receiver"));
+    if (m_trayReceiverAction) {
+        m_trayReceiverAction->setText(running ? QStringLiteral("Stop receiver")
+                                              : QStringLiteral("Start receiver"));
     }
 
+    m_sessionState->setText(receiverStateLabel(state));
+    if (state != ReceiverState::Mirroring) {
+        m_videoSurface->setStreaming(false);
+    }
+    switch (state) {
+    case ReceiverState::Stopped:
+        m_videoSurface->setPlaceholderText(QStringLiteral("Receiver is stopped"),
+                                           QStringLiteral("Select Start receiver when you are ready."));
+        break;
+    case ReceiverState::Starting:
+    case ReceiverState::Retrying:
+        m_videoSurface->setPlaceholderText(QStringLiteral("Starting the receiver…"),
+                                           QStringLiteral("Preparing AirPlay discovery and the embedded renderer."));
+        break;
+    case ReceiverState::Ready:
+        m_videoSurface->setPlaceholderText(
+            QStringLiteral("Ready to mirror"),
+            QStringLiteral("On iPad, open Control Center → Screen Mirroring → %1").arg(m_config.receiverName));
+        break;
+    case ReceiverState::Connecting:
+        m_videoSurface->setPlaceholderText(QStringLiteral("Device is connecting…"),
+                                           QStringLiteral("The stream will appear here automatically."));
+        break;
+    case ReceiverState::Mirroring:
+        m_videoSurface->setStreaming(true);
+        if (!m_sessionElapsed.isValid()) m_sessionElapsed.start();
+        break;
+    case ReceiverState::Error:
+        m_videoSurface->setPlaceholderText(QStringLiteral("Receiver needs attention"),
+                                           QStringLiteral("Open Diagnostics or restart the receiver."));
+        break;
+    }
+}
+
+void MainWindow::handleReceiverEvent(const ReceiverEvent &event) {
+    const auto type = static_cast<uxplay_event_type>(event.type);
+    QString category = QStringLiteral("Receiver");
+    if (type == UXPLAY_EVENT_CLIENT_CONNECTING) {
+        category = QStringLiteral("Connection");
+        if (!event.deviceName.isEmpty()) m_deviceName->setText(event.deviceName);
+        if (!event.deviceModel.isEmpty()) m_deviceModel->setText(event.deviceModel);
+    } else if (type == UXPLAY_EVENT_MIRRORING_STARTED) {
+        category = QStringLiteral("Stream");
+        m_sessionElapsed.restart();
+        m_resolution->setText(event.width > 0 && event.height > 0
+                                  ? QStringLiteral("%1 × %2").arg(event.width).arg(event.height)
+                                  : m_config.qualityLabel());
+        if (m_config.notifications && m_tray) {
+            m_tray->showMessage(QStringLiteral("Screen sharing started"),
+                                QStringLiteral("%1 is now mirroring inside UxPlay Studio.")
+                                    .arg(m_deviceName->text()),
+                                QSystemTrayIcon::Information, 3000);
+        }
+    } else if (type == UXPLAY_EVENT_STREAM_STOPPED) {
+        category = QStringLiteral("Stream");
+        m_sessionElapsed.invalidate();
+        m_duration->setText(QStringLiteral("00:00"));
+        m_resolution->setText(QStringLiteral("—"));
+    } else if (type == UXPLAY_EVENT_PIN_REQUIRED) {
+        category = QStringLiteral("Security");
+        m_sessionState->setText(QStringLiteral("Enter PIN %1 on your device").arg(event.message));
+    } else if (type == UXPLAY_EVENT_WARNING) {
+        category = QStringLiteral("Warning");
+    } else if (type == UXPLAY_EVENT_ERROR) {
+        category = QStringLiteral("Error");
+    }
+    appendActivity(category, event.message.isEmpty() ? receiverStateLabel(m_engine->state())
+                                                      : event.message);
+}
+
+void MainWindow::updateSessionTimer() {
+    if (m_engine->state() == ReceiverState::Mirroring && m_sessionElapsed.isValid()) {
+        m_duration->setText(formatDuration(m_sessionElapsed.elapsed() / 1000));
+    }
+}
+
+void MainWindow::appendActivity(const QString &category, const QString &message) {
+    if (!m_activityLog) {
+        return;
+    }
+    const QString timestamp = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"));
+    m_activityLog->append(QStringLiteral("%1  [%2]  %3").arg(timestamp, category, message));
+}
+
+ReceiverConfig MainWindow::configFromControls() const {
+    ReceiverConfig config;
+    config.receiverName = m_receiverNameEdit->text().trimmed();
+    config.quality = static_cast<QualityProfile>(m_qualityCombo->currentData().toInt());
+    config.pinEnabled = m_pinEnabledCheck->isChecked();
+    config.pin = m_pinEdit->text();
+    config.bluetoothDiscovery = m_bluetoothCheck->isChecked();
+    config.autostart = m_autostartCheck->isChecked();
+    config.notifications = m_notificationsCheck->isChecked();
+    return config;
+}
+
+void MainWindow::loadConfigIntoControls() {
+    m_receiverNameEdit->setText(m_config.receiverName);
+    const int qualityIndex = m_qualityCombo->findData(static_cast<int>(m_config.quality));
+    m_qualityCombo->setCurrentIndex(qualityIndex >= 0 ? qualityIndex : 0);
+    m_pinEnabledCheck->setChecked(m_config.pinEnabled);
+    m_pinEdit->setText(m_config.pin);
+    m_pinEdit->setEnabled(m_config.pinEnabled);
+    m_bluetoothCheck->setChecked(m_config.bluetoothDiscovery);
+    m_autostartCheck->setChecked(m_config.autostart);
+    m_notificationsCheck->setChecked(m_config.notifications);
+    updateSecuritySummary();
+}
+
+void MainWindow::saveSettings() {
+    const ReceiverConfig updated = configFromControls();
+    const QString error = updated.validationError();
+    if (!error.isEmpty()) {
+        m_settingsFeedback->setText(error);
+        m_settingsFeedback->setStyleSheet(QStringLiteral("color: #ff6b7a;"));
+        return;
+    }
+    m_config = updated;
+    SettingsStore::save(m_config);
+    setAutostart(m_config.autostart);
+    m_sidebarReceiver->setText(m_config.receiverName);
+    updateSecuritySummary();
+    refreshDiagnostics();
+    m_settingsFeedback->setText(QStringLiteral("Saved. Receiver restarted with the new settings."));
+    m_settingsFeedback->setStyleSheet(QStringLiteral("color: #38d996;"));
+    appendActivity(QStringLiteral("Settings"), QStringLiteral("Receiver settings were updated."));
+    if (m_engine->isRunning()) {
+        restartReceiver();
+    }
+}
+
+void MainWindow::updateSecuritySummary() {
+    if (!m_securitySummary) {
+        return;
+    }
+    m_securitySummary->setText(m_config.pinEnabled
+        ? QStringLiteral("Protected by AirPlay PIN")
+        : QStringLiteral("Open receiver · PIN recommended on shared Wi-Fi"));
+    m_securitySummary->setStyleSheet(m_config.pinEnabled
+        ? QStringLiteral("color: #38d996;") : QStringLiteral("color: #f6c85f;"));
+}
+
+void MainWindow::refreshDiagnostics() {
+    if (!m_diagnostics || !m_videoSurface) {
+        return;
+    }
+    m_networkAddress->setText(NetworkDiagnostics::primaryAddress());
+    m_diagnostics->setPlainText(
+        NetworkDiagnostics::report(m_config, m_videoSurface->nativeHandle()));
+}
+
+QString MainWindow::bleStatusPath() const {
+    const QString directory = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(directory);
+    return QDir::toNativeSeparators(QDir(directory).filePath(QStringLiteral("uxplay_status.ble")));
+}
+
+void MainWindow::startBluetoothBeacon() {
+    if (!m_config.bluetoothDiscovery || (m_beacon && m_beacon->state() != QProcess::NotRunning)) {
+        return;
+    }
+    const QString executable = QDir(QApplication::applicationDirPath())
+        .filePath(QStringLiteral("uxplay-bluetooth-beacon.exe"));
+    if (!QFile::exists(executable)) {
+        appendActivity(QStringLiteral("Bluetooth"),
+                       QStringLiteral("Bluetooth helper is not present in this development build."));
+        return;
+    }
     m_beacon = new QProcess(this);
     m_beacon->setProcessChannelMode(QProcess::MergedChannels);
-
-    connect(m_beacon, &QProcess::readyRead, this, [this]() {
-        // Forward beacon logs to our debug console
-        qDebug() << "[beacon output]" << m_beacon->readAll().trimmed();
+#ifdef Q_OS_WIN
+    m_beacon->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *arguments) {
+        arguments->flags |= CREATE_NO_WINDOW;
     });
-
-    // Pass the explicit path to the beacon file
-    m_beacon->start(exe, {"--path", path});
-    qDebug() << "Beacon process started watching:" << path;
+#endif
+    connect(m_beacon, &QProcess::readyRead, this, [this]() {
+        const QString text = QString::fromLocal8Bit(m_beacon->readAll()).trimmed();
+        if (!text.isEmpty()) appendActivity(QStringLiteral("Bluetooth"), text);
+    });
+    m_beacon->start(executable, {QStringLiteral("--path"), bleStatusPath()});
 }
 
 void MainWindow::stopBluetoothBeacon() {
-    if (!m_beacon) return;
-    
-    qDebug() << "Stopping beacon process";
+    if (!m_beacon) {
+        return;
+    }
     if (m_beacon->state() != QProcess::NotRunning) {
         m_beacon->terminate();
-        if (!m_beacon->waitForFinished(500)) {
-            qDebug() << "Beacon didn't terminate, killing";
+        if (!m_beacon->waitForFinished(800)) {
             m_beacon->kill();
-            m_beacon->waitForFinished(100);
+            m_beacon->waitForFinished(200);
         }
     }
-    
     delete m_beacon;
     m_beacon = nullptr;
-    qDebug() << "Beacon stopped and cleaned up";
 }
 
-void MainWindow::showLicense() {
-    QString path = QApplication::applicationDirPath() + "/LICENSE.rtf";
-    if (QFile::exists(path)) {
-        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
-    } else qDebug() << "License file not found:" << path;
+bool MainWindow::ensureBonjourAvailable() {
+    if (NetworkDiagnostics::bonjourServiceAvailable()) {
+        return true;
+    }
+    const auto answer = QMessageBox::question(
+        this, QStringLiteral("Bonjour Service required"),
+        QStringLiteral("AirPlay discovery needs Bonjour Service. Install it now?"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if (answer != QMessageBox::Yes) {
+        return false;
+    }
+    const int result = mdns::MdnsResponder::install();
+    return result == 0 && NetworkDiagnostics::bonjourServiceAvailable();
 }
 
-void MainWindow::quit() {
+bool MainWindow::autostartEnabled() const {
+#ifdef Q_OS_WIN
+    QSettings registry(QStringLiteral(
+        "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+        QSettings::NativeFormat);
+    return registry.contains(QStringLiteral("UxPlayStudio"));
+#else
+    return false;
+#endif
+}
+
+void MainWindow::setAutostart(bool enabled) {
+#ifdef Q_OS_WIN
+    QSettings registry(QStringLiteral(
+        "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+        QSettings::NativeFormat);
+    if (enabled) {
+        registry.setValue(QStringLiteral("UxPlayStudio"),
+                          QStringLiteral("\"%1\"").arg(QDir::toNativeSeparators(
+                              QApplication::applicationFilePath())));
+    } else {
+        registry.remove(QStringLiteral("UxPlayStudio"));
+    }
+#else
+    Q_UNUSED(enabled)
+#endif
+}
+
+void MainWindow::enterFullscreen() {
+    if (m_fullscreen) return;
+    selectPage(0);
+    m_fullscreen = true;
+    m_sidebar->hide();
+    m_header->hide();
+    m_sessionPanel->hide();
+    m_fullscreenButton->setText(QStringLiteral("Exit fullscreen"));
+    showFullScreen();
+}
+
+void MainWindow::exitFullscreen() {
+    if (!m_fullscreen) return;
+    m_fullscreen = false;
+    showNormal();
+    m_sidebar->show();
+    m_header->show();
+    m_sessionPanel->show();
+    m_fullscreenButton->setText(QStringLiteral("Fullscreen"));
+}
+
+void MainWindow::showFromTray() {
+    if (m_fullscreen) exitFullscreen();
+    showNormal();
+    raise();
+    activateWindow();
+}
+
+void MainWindow::quitApplication() {
     m_quitting = true;
-    stopServer();
+    stopBluetoothBeacon();
+    m_engine->stop();
     QApplication::quit();
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
-    if (!m_quitting) {
-        hide();
-        event->ignore();
-    } else {
+    if (m_quitting) {
         event->accept();
+        return;
+    }
+    if (!m_tray) {
+        m_quitting = true;
+        event->accept();
+        QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+        return;
+    }
+    hide();
+    event->ignore();
+    if (!m_closeHintShown) {
+        m_tray->showMessage(QStringLiteral("UxPlay Studio is still ready"),
+                            QStringLiteral("Use the tray icon to reopen or quit the app."),
+                            QSystemTrayIcon::Information, 3000);
+        m_closeHintShown = true;
     }
 }
 
-void MainWindow::updateStatus() {
-    QString status = m_running ? "UxPlay server running" : "UxPlay server stopped";
-    m_statusLabel->setText(status);
-    m_autostartCheckbox->setChecked(isAutostartEnabled());
-}
-
-bool MainWindow::isWindowsServicePresent(const std::wstring& serviceName) const {
-    SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (!hSCM) return false;
-
-    SC_HANDLE hSvc = OpenServiceW(hSCM, serviceName.c_str(), SERVICE_QUERY_STATUS);
-    if (!hSvc) {
-        DWORD err = GetLastError();
-        CloseServiceHandle(hSCM);
-        return err != ERROR_SERVICE_DOES_NOT_EXIST;
+void MainWindow::keyPressEvent(QKeyEvent *event) {
+    if (event->key() == Qt::Key_F11) {
+        m_fullscreen ? exitFullscreen() : enterFullscreen();
+        event->accept();
+        return;
     }
-
-    CloseServiceHandle(hSvc);
-    CloseServiceHandle(hSCM);
-    return true;
-}
-
-bool MainWindow::ensureBonjourServiceInstalled() {
-    const std::wstring serviceName = L"Bonjour Service";
-
-    if (isWindowsServicePresent(serviceName)) {
-        return true;
+    if (event->key() == Qt::Key_Escape && m_fullscreen) {
+        exitFullscreen();
+        event->accept();
+        return;
     }
-
-    int choice = QMessageBox::question(
-        this,
-        "Bonjour Service Required",
-        "Bonjour Service is required for discovery (mDNS). It is not "
-        "installed.\n\nDo you want to install it now?",
-        QMessageBox::Yes | QMessageBox::No,
-        QMessageBox::Yes
-    );
-
-    if (choice != QMessageBox::Yes) {
-        QMessageBox::critical(
-            this,
-            "Bonjour Service Missing",
-            "Bonjour Service is required. The application will now exit."
-        );
-        return false;
-    }
-
-    QMessageBox::information(
-        this,
-        "Installing Bonjour Service",
-        "Starting installation of 'Bonjour Service'. Follow any UAC prompt."
-    );
-
-    int rc = mdns::MdnsResponder::install();
-
-    // Re-check after install to be safe.
-    if (rc == 0 && isWindowsServicePresent(serviceName)) {
-        QMessageBox::information(
-            this,
-            "Installation Complete",
-            "Bonjour Service installed successfully.\nThe application will restart."
-        );
-        restartApplication();
-        return false; // do not start server in this instance
-    }
-
-    QMessageBox::critical(
-        this,
-        "Installation Failed",
-        "Failed to install 'Bonjour Service'.\n\n"
-        "The application will now exit."
-    );
-    return false;
-}
-
-void MainWindow::restartApplication() {
-    m_quitting = true;
-    stopServer();
-
-    QString exePath = QApplication::applicationFilePath();
-    QStringList args = QCoreApplication::arguments();
-    if (!args.isEmpty()) args.removeFirst(); // remove exe path
-
-    QProcess::startDetached(exePath, args);
-
-    // close GUI of current process after a short delay
-    QTimer::singleShot(200, qApp, &QCoreApplication::quit);
+    QMainWindow::keyPressEvent(event);
 }

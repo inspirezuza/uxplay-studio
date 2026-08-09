@@ -272,6 +272,10 @@ function Build-Application {
         -FilePath $cmake `
         -Arguments @("--build", $buildDir, "--parallel")
 
+    Invoke-Native `
+        -FilePath (Join-Path $runtimeBin "ctest.exe") `
+        -Arguments @("--test-dir", $buildDir, "--output-on-failure", "-C", "Release")
+
     $beaconSource = Join-Path $projectRoot "libuxplay\Bluetooth_LE_beacon"
     $beaconDist = Join-Path $beaconOutDir "dist"
     $beaconWork = Join-Path $beaconOutDir "work"
@@ -338,9 +342,9 @@ function Write-BuildManifest {
         architecture = $Architecture
         branch = (& git -C $projectRoot branch --show-current).Trim()
         commit = (& git -C $projectRoot rev-parse HEAD).Trim()
-        # Read the gitlink directly. `git submodule` launches helper shell
-        # scripts whose Unix utilities might not be on PATH in PowerShell.
-        libuxplayCommit = (& git -C $projectRoot rev-parse HEAD:libuxplay).Trim()
+        libuxplayCommit = (Get-Content -Raw -LiteralPath (
+            Join-Path $projectRoot "libuxplay\UPSTREAM_COMMIT"
+        )).Trim()
         cmake = (& $cmake --version | Select-Object -First 1)
         msys2Python = (& $python --version 2>&1)
         beaconPython = (& $beaconPython --version 2>&1)
@@ -376,8 +380,8 @@ function Stage-Runtime {
         Out-Null
 
     Copy-Item `
-        (Join-Path $buildDir "uxplay-windows.exe") `
-        (Join-Path $stageDir "uxplay-windows.exe") `
+        (Join-Path $buildDir "uxplay-studio.exe") `
+        (Join-Path $stageDir "uxplay-studio.exe") `
         -Force
     Copy-Item `
         (Join-Path $beaconOutDir "dist\uxplay-bluetooth-beacon.exe") `
@@ -416,7 +420,7 @@ function Stage-Runtime {
             "--no-translations",
             "--no-compiler-runtime",
             "--dir", $stageDir,
-            (Join-Path $stageDir "uxplay-windows.exe")
+            (Join-Path $stageDir "uxplay-studio.exe")
         )
 
     $gstPluginDir = Join-Path $prefix "lib\gstreamer-1.0"
@@ -550,7 +554,7 @@ function Ensure-Wix {
 
 function Build-Artifacts {
     New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
-    $zip = Join-Path $artifactDir "uxplay-windows-$Architecture-portable.zip"
+    $zip = Join-Path $artifactDir "uxplay-studio-$Architecture-portable.zip"
     if (Test-Path -LiteralPath $zip) {
         Remove-Item -LiteralPath $zip -Force
     }
@@ -562,7 +566,7 @@ function Build-Artifacts {
     if (-not $SkipInstaller) {
         Ensure-Wix
         $dotnet = (Get-Command dotnet.exe -ErrorAction Stop).Source
-        $msi = Join-Path $artifactDir "uxplay-windows-$Architecture.msi"
+        $msi = Join-Path $artifactDir "uxplay-studio-$Architecture.msi"
         $wixPdb = [IO.Path]::ChangeExtension($msi, ".wixpdb")
         if (Test-Path -LiteralPath $wixPdb) {
             Remove-Item -LiteralPath $wixPdb -Force

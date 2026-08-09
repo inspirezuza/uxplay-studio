@@ -1,32 +1,31 @@
 #include "mainwindow.h"
+
 #include <QApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QIcon>
-#include <QMessageBox>
 #include <QProcessEnvironment>
-#include <QSystemTrayIcon>
 #include <QTextStream>
 
 #include <gst/gst.h>
 
-#ifdef _WIN32
+#ifdef Q_OS_WIN
 #include <windows.h>
 #include <cstdio>
 #endif
 
 static int runRuntimeSelfTest(const QString &appPath) {
-    QStringList requiredFiles = {
-        "uxplay-bluetooth-beacon.exe",
-        "dnssd.dll",
-        "mDNSResponder.exe",
-        "platforms/qwindows.dll",
-        "libexec/gstreamer-1.0/gst-plugin-scanner.exe",
-        "resources/gstreamer-features.txt",
-        "resources/gstreamer-plugins.json",
-        "resources/build-manifest.json",
-        "resources/bundle-files.json"
+    const QStringList requiredFiles {
+        QStringLiteral("uxplay-bluetooth-beacon.exe"),
+        QStringLiteral("dnssd.dll"),
+        QStringLiteral("mDNSResponder.exe"),
+        QStringLiteral("platforms/qwindows.dll"),
+        QStringLiteral("libexec/gstreamer-1.0/gst-plugin-scanner.exe"),
+        QStringLiteral("resources/gstreamer-features.txt"),
+        QStringLiteral("resources/gstreamer-plugins.json"),
+        QStringLiteral("resources/build-manifest.json"),
+        QStringLiteral("resources/bundle-files.json")
     };
 
     bool passed = true;
@@ -38,13 +37,9 @@ static int runRuntimeSelfTest(const QString &appPath) {
         }
     }
 
-#ifdef _WIN32
-    const QString dnssdPath = QDir::toNativeSeparators(
-        QDir(appPath).filePath("dnssd.dll")
-    );
-    HMODULE dnssd = LoadLibraryW(
-        reinterpret_cast<LPCWSTR>(dnssdPath.utf16())
-    );
+#ifdef Q_OS_WIN
+    const QString dnssdPath = QDir::toNativeSeparators(QDir(appPath).filePath("dnssd.dll"));
+    HMODULE dnssd = LoadLibraryW(reinterpret_cast<LPCWSTR>(dnssdPath.utf16()));
     if (!dnssd) {
         fprintf(stderr, "SELF-TEST ERROR: dnssd.dll could not be loaded\n");
         passed = false;
@@ -55,10 +50,7 @@ static int runRuntimeSelfTest(const QString &appPath) {
 
     gst_init(nullptr, nullptr);
     GstRegistry *registry = gst_registry_get();
-    QFile featureFile(QDir(appPath).filePath(
-        "resources/gstreamer-features.txt"
-    ));
-
+    QFile featureFile(QDir(appPath).filePath("resources/gstreamer-features.txt"));
     if (!featureFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
         fprintf(stderr, "SELF-TEST ERROR: cannot read GStreamer feature list\n");
         passed = false;
@@ -66,19 +58,12 @@ static int runRuntimeSelfTest(const QString &appPath) {
         QTextStream stream(&featureFile);
         while (!stream.atEnd()) {
             const QString featureName = stream.readLine().trimmed();
-            if (featureName.isEmpty() || featureName.startsWith('#')) {
-                continue;
-            }
-
-            const QByteArray featureUtf8 = featureName.toUtf8();
+            if (featureName.isEmpty() || featureName.startsWith('#')) continue;
+            const QByteArray utf8 = featureName.toUtf8();
             GstPluginFeature *feature = gst_registry_find_feature(
-                registry,
-                featureUtf8.constData(),
-                GST_TYPE_ELEMENT_FACTORY
-            );
+                registry, utf8.constData(), GST_TYPE_ELEMENT_FACTORY);
             if (!feature) {
-                fprintf(stderr, "SELF-TEST ERROR: GStreamer feature missing: %s\n",
-                        featureUtf8.constData());
+                fprintf(stderr, "SELF-TEST ERROR: GStreamer feature missing: %s\n", utf8.constData());
                 passed = false;
             } else {
                 gst_object_unref(feature);
@@ -87,67 +72,74 @@ static int runRuntimeSelfTest(const QString &appPath) {
     }
 
     if (passed) {
-        fprintf(stdout, "SELF-TEST OK: runtime bundle is complete\n");
+        fprintf(stdout, "SELF-TEST OK: UxPlay Studio runtime bundle is complete\n");
         return 0;
     }
     return 2;
 }
 
 int main(int argc, char *argv[]) {
-#ifdef _WIN32
-    // if the process was started from a console (CMD/PowerShell), attach to it so we can see qDebug() output.
+#ifdef Q_OS_WIN
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-        // redirect stdout and stderr to the console
-        FILE* fp;
-        freopen_s(&fp, "CONOUT$", "w", stdout);
-        freopen_s(&fp, "CONOUT$", "w", stderr);
-        freopen_s(&fp, "CONIN$", "r", stdin);
-        std::ios::sync_with_stdio();
+        FILE *stream = nullptr;
+        freopen_s(&stream, "CONOUT$", "w", stdout);
+        freopen_s(&stream, "CONOUT$", "w", stderr);
     }
 #endif
 
     QApplication app(argc, argv);
-    app.setOrganizationName("leapbtw");
-    app.setApplicationName("uxplay-windows");
-    app.setWindowIcon(QIcon(QApplication::applicationDirPath() + "/resources/icon.ico"));
-    
-    QString appPath = QApplication::applicationDirPath();
-    
-    QString pluginPath = QDir::toNativeSeparators(appPath + "/lib/gstreamer-1.0");
+    app.setOrganizationName(QStringLiteral("inspirezuza"));
+    app.setOrganizationDomain(QStringLiteral("github.com/inspirezuza"));
+    app.setApplicationName(QStringLiteral("UxPlay Studio"));
+    app.setApplicationDisplayName(QStringLiteral("UxPlay Studio"));
+    app.setApplicationVersion(QStringLiteral("1.0.0"));
+    app.setWindowIcon(QIcon(QDir(QApplication::applicationDirPath())
+                                .filePath(QStringLiteral("resources/icon.ico"))));
+
+    const QString appPath = QApplication::applicationDirPath();
+    const QString pluginPath = QDir::toNativeSeparators(appPath + "/lib/gstreamer-1.0");
     qputenv("GST_PLUGIN_PATH", pluginPath.toUtf8());
     qputenv("GST_PLUGIN_PATH_1_0", pluginPath.toUtf8());
     qputenv("GST_PLUGIN_SYSTEM_PATH", pluginPath.toUtf8());
     qputenv("GST_PLUGIN_SYSTEM_PATH_1_0", pluginPath.toUtf8());
-
-    QString scannerPath = QDir::toNativeSeparators(
-        appPath + "/libexec/gstreamer-1.0/gst-plugin-scanner.exe"
-    );
+    const QString scannerPath = QDir::toNativeSeparators(
+        appPath + "/libexec/gstreamer-1.0/gst-plugin-scanner.exe");
     qputenv("GST_PLUGIN_SCANNER", scannerPath.toUtf8());
     qputenv("GST_PLUGIN_SCANNER_1_0", scannerPath.toUtf8());
-    qputenv(
-        "GIO_EXTRA_MODULES",
-        QDir::toNativeSeparators(appPath + "/lib/gio/modules").toUtf8()
-    );
-    qputenv(
-        "FONTCONFIG_PATH",
-        QDir::toNativeSeparators(appPath + "/etc/fonts").toUtf8()
-    );
-
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    QString path = QDir::toNativeSeparators(appPath) + ";" + env.value("PATH");
+    qputenv("GIO_EXTRA_MODULES",
+            QDir::toNativeSeparators(appPath + "/lib/gio/modules").toUtf8());
+    qputenv("FONTCONFIG_PATH", QDir::toNativeSeparators(appPath + "/etc/fonts").toUtf8());
+    const QString path = QDir::toNativeSeparators(appPath) + ";" +
+                         QProcessEnvironment::systemEnvironment().value("PATH");
     qputenv("PATH", path.toUtf8());
 
-    if (app.arguments().contains("--self-test")) {
+    if (app.arguments().contains(QStringLiteral("--self-test"))) {
         return runRuntimeSelfTest(appPath);
     }
 
+    QFile theme(QStringLiteral(":/theme.qss"));
+    if (theme.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        app.setStyleSheet(QString::fromUtf8(theme.readAll()));
+    }
     app.setQuitOnLastWindowClosed(false);
 
-    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
-        QMessageBox::critical(nullptr, "Error", "System tray not available.");
-        return 1;
+#ifdef Q_OS_WIN
+    HANDLE singleInstance = CreateMutexW(nullptr, TRUE, L"Local\\UxPlayStudio.SingleInstance");
+    if (singleInstance && GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (HWND existing = FindWindowW(nullptr, L"UxPlay Studio")) {
+            ShowWindow(existing, SW_RESTORE);
+            SetForegroundWindow(existing);
+        }
+        CloseHandle(singleInstance);
+        return 0;
     }
+#endif
 
     MainWindow window;
-    return app.exec();
+    window.show();
+    const int result = app.exec();
+#ifdef Q_OS_WIN
+    if (singleInstance) CloseHandle(singleInstance);
+#endif
+    return result;
 }

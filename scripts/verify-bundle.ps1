@@ -33,7 +33,7 @@ if (-not $SkipStaticValidation) {
 }
 
 $requiredFiles = @(
-    "uxplay-windows.exe",
+    "uxplay-studio.exe",
     "uxplay-bluetooth-beacon.exe",
     "dnssd.dll",
     "mDNSResponder.exe",
@@ -103,9 +103,9 @@ try {
     $env:GIO_EXTRA_MODULES = Join-Path $stage "lib\gio\modules"
     $env:FONTCONFIG_PATH = Join-Path $stage "etc\fonts"
 
-    & (Join-Path $stage "uxplay-windows.exe") --self-test
+    & (Join-Path $stage "uxplay-studio.exe") --self-test
     if ($LASTEXITCODE -ne 0) {
-        throw "uxplay-windows runtime self-test failed with exit code $LASTEXITCODE"
+        throw "UxPlay Studio runtime self-test failed with exit code $LASTEXITCODE"
     }
 }
 finally {

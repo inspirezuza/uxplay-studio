@@ -1,109 +1,86 @@
-```diff
-+ 29 july 2026
-+ new build system seems to be working great for both x64 and arm64.
-+ I'd like to understand if it's possible for me to codesign uxplay-windows before making a new release
-```
+<p align="center">
+  <img src="docs/uxplay-studio-icon.png" width="128" alt="UxPlay Studio icon">
+</p>
 
-# FREE AirPlay to your Windows PC
-Free as both in "freedom" and "free beer"!
+# UxPlay Studio
 
-## Installation
-Download the latest version of uxplay-windows from [**releases**](https://github.com/leapbtw/uxplay-windows/releases/latest).
+Modern, single-window AirPlay screen mirroring for Windows.
 
-After installing, control uxplay-windows from it's [tray icon](https://www.odu.edu/sites/default/files/documents/win10-system-tray.pdf)! Right-click it to start or stop AirPlay. \
-You can also set it to run automatically when your PC starts
+UxPlay Studio keeps the receiver, live video, connection status, settings, activity log, and diagnostics in one native Windows app. The mirrored screen is rendered directly into the app through GStreamer's D3D11 video overlay—there is no separate playback window to chase around the desktop.
 
-## WIKI (FAQ / Troubleshooting / Help)
-Please take a look at the [Wiki](https://github.com/leapbtw/uxplay-windows/wiki), it should contain everything you're looking for
+> [!NOTE]
+> UxPlay Studio is an independent open-source project built on [UxPlay](https://github.com/FDH2/UxPlay) and [uxplay-windows](https://github.com/leapbtw/uxplay-windows). It is not affiliated with or endorsed by Apple Inc.
 
-> [!IMPORTANT]
-> *Why is Windows Defender complaining during installation?*
-> 
-> ![alt text](https://raw.githubusercontent.com/leapbtw/uxplay-windows/refs/heads/x64/stuff/defender.png "defender")
->
-> Just click on `More info` and it will let you install. It complains because the executable is not signed. If you don't trust this software you can always build it yourself! See below.
->
-> If prompted by Windows Firewall, please **allow** uxplay-windows to ensure it functions properly.
+## Highlights
 
-<br>
-<details>
-<summary><strong>Building</strong></summary>
+- Embedded AirPlay video in the main app window
+- Same-window fullscreen with `F11` and `Esc`
+- Clear receiver states: starting, ready, connecting, sharing, and recovery
+- Device, resolution, and session-duration status
+- 1080p60, 720p30, and low-latency profiles
+- Optional four-digit PIN for shared Wi-Fi networks
+- Local activity log and copyable diagnostics
+- Bonjour and Bluetooth discovery support
+- Automatic recovery with capped backoff
+- Native Qt 6 UI and hardware-friendly D3D11 rendering
+- Portable x64 and ARM64 build pipeline
 
-*How do I build this software myself?*
- 
-Please see [BUILDING.md](./docs/BUILDING.md)
-<br>
-</details>
+## Download
 
-<details>
-<summary><strong>Advanced configuration</strong></summary>
+Download the latest portable ZIP from [Releases](https://github.com/inspirezuza/uxplay-studio/releases). Extract it and run `uxplay-studio.exe`.
 
-<br>
+Windows may display a SmartScreen warning because community builds are not code-signed. The complete source and reproducible build workflow are available in this repository.
 
-UxPlay arguments are read from `arguments.txt`.
+## Use
 
-Configuration precedence:
+1. Connect the Windows PC and iPhone or iPad to the same Wi-Fi network.
+2. Start UxPlay Studio and wait for **Ready to mirror**.
+3. Open Control Center on the Apple device.
+4. Select **Screen Mirroring**, then select the receiver name shown by UxPlay Studio.
 
-1. `%ProgramData%\uxplay-windows\arguments.txt`
-2. `%APPDATA%\leapbtw\uxplay-windows\arguments.txt`
-3. built-in default: `-n uxplay-windows -nh`
+Some managed, hotel, dorm, or guest Wi-Fi networks block multicast DNS or isolate clients. In that case use a network that permits device-to-device traffic, or enable the Bluetooth discovery fallback. A hotspot is not required when normal Wi-Fi permits discovery and local traffic.
 
-The machine-wide file takes precedence when it exists, allowing administrators
-to enforce a shared configuration. When it is absent, each user can maintain
-their own configuration under `%APPDATA%`.
+## Build from source
 
-Environment variables are expanded when the app starts. For example:
+Requirements:
 
-```text
--n %COMPUTERNAME% -nh
-```
-
-</details>
-
-<details>
-<summary><strong>Local development (x64 and ARM64)</strong></summary>
-
-<br>
-
-After installing MSYS2, the complete local build is one PowerShell command:
+- Windows 10 or 11
+- [MSYS2](https://www.msys2.org/) at `C:\msys64`
+- Native Windows Python 3.14
+- Visual Studio Build Tools with the C++ workload
+- .NET 8 only when building the MSI
 
 ```powershell
-.\build.ps1 package -Architecture x64
-.\build.ps1 package -Architecture arm64
+git clone https://github.com/inspirezuza/uxplay-studio.git
+cd uxplay-studio
+.\build.ps1 bootstrap -Architecture x64
+.\build.ps1 package -Architecture x64 -SkipInstaller
 ```
 
-Each command produces a verified portable ZIP and MSI under the corresponding
-`out\<architecture>\artifacts` directory. See the [developer
-guide](./docs/DEVELOPERS-GUIDE.md) for prerequisites and additional commands.
+The verified portable ZIP is written to `out\x64\artifacts`. See [the developer guide](docs/DEVELOPERS-GUIDE.md) for x64 and ARM64 details.
 
-</details>
+## Architecture
 
-<details>
-<summary><strong>TODO</strong></summary>
+```text
+Qt MainWindow
+  ├─ Player / native VideoSurface (HWND)
+  ├─ Activity, Settings, Diagnostics
+  └─ ReceiverEngine state machine
+       └─ vendored libuxplay
+            └─ GStreamer d3d11videosink
+                 └─ GstVideoOverlay → VideoSurface HWND
+```
 
-<br>
+`ReceiverEngine` is the app-facing seam. UxPlay, GStreamer, worker threads, restart policy, and native video embedding stay behind that interface. Tests exercise configuration and state behavior without needing an AirPlay device.
 
-- make an update checker
-- include uxplay.exe for debugging purposes
-- ~~pass arguments from uxplay-windows.exe to uxplay~~ or maybe not
+## Privacy and security
 
-</details>
+UxPlay Studio operates locally. It does not upload screen content, activity, or diagnostics. On a shared network, enable the four-digit AirPlay PIN in Settings. Diagnostics intentionally exclude the PIN.
 
-<details>
-<summary><strong>Known Issues</strong></summary>
+## Contributing
 
-<br>
+Bug reports and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change. Security issues should follow [SECURITY.md](SECURITY.md).
 
-~~uxplay bugs out when waking PC from Sleep~~
-~~you can fix this by killing uxplay-windows.exe and restarting Bonjour Service, and restarting uxplay.exe. Also restarting your PC might fix this.~~  \
-Apparently moving from Bonjour PS to mDNSResponder fixed it? :)
+## Credits and license
 
-- Sometimes just after connecting the iPhone to uxplay-windows, the stream appears but frozen. Reconnecting a second time fixes this. Probably an upstream issue maybe already fixed in the newer UxPlay version. I need to investigate further
-
-</details>
-
-## Reporting Issues
-Please report issues related to the build system created with GitHub Actions in this repository. For issues related to other parts of this software, report them in their respective repositories.
-
-## License
-Please take a look at the [LICENSE](./docs/LICENSE.rtf).
+UxPlay Studio is licensed under the [GNU General Public License v3.0 or later](LICENSE). It contains a vendored, modified copy of UxPlay; upstream attribution and the exact source revision are documented in [NOTICE.md](NOTICE.md) and `libuxplay/UPSTREAM_COMMIT`.

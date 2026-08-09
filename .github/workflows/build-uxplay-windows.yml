@@ -1,4 +1,4 @@
-name: build uxplay-windows
+name: build UxPlay Studio
 
 on:
   push:
@@ -46,7 +46,6 @@ jobs:
       - name: check out repository
         uses: actions/checkout@v5
         with:
-          submodules: recursive
           fetch-depth: 1
 
       - name: restore Bonjour SDK cache
@@ -99,6 +98,6 @@ jobs:
       - name: upload ${{ matrix.architecture }} artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: uxplay-windows-${{ matrix.architecture }}
+          name: uxplay-studio-${{ matrix.architecture }}
           path: out/${{ matrix.architecture }}/artifacts/*
           if-no-files-found: error

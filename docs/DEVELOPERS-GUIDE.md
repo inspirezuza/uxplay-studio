@@ -1,6 +1,7 @@
 # Multi-architecture developer guide
 
-The x64 and ARM64 builds share one entry point for local development and CI:
+The x64 and ARM64 builds share one entry point for local development and CI.
+Every build also runs the Qt state, configuration, and native-video-surface tests:
 
 ```powershell
 .\build.ps1 package -Architecture x64
