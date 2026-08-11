@@ -3,6 +3,7 @@
 #include "appstate.h"
 #include "receiverconfig.h"
 
+#include <QByteArray>
 #include <QElapsedTimer>
 #include <QList>
 #include <QMainWindow>
@@ -14,12 +15,14 @@ class QCloseEvent;
 class QKeyEvent;
 class QLabel;
 class QLineEdit;
+class QHBoxLayout;
 class QPlainTextEdit;
 class QProcess;
 class QPushButton;
 class QStackedWidget;
 class QSystemTrayIcon;
 class QTextEdit;
+class QVBoxLayout;
 class QWidget;
 class ReceiverEngine;
 class VideoSurface;
@@ -79,7 +82,10 @@ private:
     bool m_autoStart = true;
     bool m_quitting = false;
     bool m_fullscreen = false;
+    bool m_cursorOverride = false;
     bool m_closeHintShown = false;
+    QByteArray m_geometryBeforeFullscreen;
+    Qt::WindowStates m_windowStateBeforeFullscreen;
 
     QWidget *m_sidebar = nullptr;
     QWidget *m_header = nullptr;
@@ -91,6 +97,12 @@ private:
     QPushButton *m_receiverToggle = nullptr;
 
     VideoSurface *m_videoSurface = nullptr;
+    QWidget *m_playerPage = nullptr;
+    QWidget *m_playerCard = nullptr;
+    QWidget *m_playerChrome = nullptr;
+    QWidget *m_playerControls = nullptr;
+    QHBoxLayout *m_playerPageLayout = nullptr;
+    QVBoxLayout *m_playerLayout = nullptr;
     QWidget *m_sessionPanel = nullptr;
     QLabel *m_sessionState = nullptr;
     QLabel *m_deviceName = nullptr;

@@ -57,6 +57,13 @@ QWidget *card(QWidget *parent = nullptr) {
     return widget;
 }
 
+void refreshStyle(QWidget *widget) {
+    if (!widget) return;
+    widget->style()->unpolish(widget);
+    widget->style()->polish(widget);
+    widget->update();
+}
+
 QString formatDuration(qint64 seconds) {
     const qint64 hours = seconds / 3600;
     const qint64 minutes = (seconds % 3600) / 60;
@@ -106,6 +113,10 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart)
 
 MainWindow::~MainWindow() {
     m_quitting = true;
+    if (m_cursorOverride) {
+        QApplication::restoreOverrideCursor();
+        m_cursorOverride = false;
+    }
     stopBluetoothBeacon();
 }
 
@@ -210,45 +221,55 @@ void MainWindow::selectPage(int page) {
 }
 
 QWidget *MainWindow::createPlayerPage() {
-    auto *page = new QWidget(this);
-    page->setObjectName(QStringLiteral("page"));
-    auto *layout = new QHBoxLayout(page);
-    layout->setContentsMargins(30, 24, 30, 30);
-    layout->setSpacing(20);
+    m_playerPage = new QWidget(this);
+    m_playerPage->setObjectName(QStringLiteral("page"));
+    m_playerPageLayout = new QHBoxLayout(m_playerPage);
+    m_playerPageLayout->setObjectName(QStringLiteral("playerPageLayout"));
+    m_playerPageLayout->setContentsMargins(30, 24, 30, 30);
+    m_playerPageLayout->setSpacing(20);
 
-    auto *playerCard = card(page);
-    auto *playerLayout = new QVBoxLayout(playerCard);
-    playerLayout->setContentsMargins(18, 18, 18, 16);
-    playerLayout->setSpacing(14);
-    auto *titleRow = new QHBoxLayout();
-    auto *title = new QLabel(QStringLiteral("Live screen"), playerCard);
+    m_playerCard = card(m_playerPage);
+    m_playerCard->setObjectName(QStringLiteral("playerCard"));
+    m_playerLayout = new QVBoxLayout(m_playerCard);
+    m_playerLayout->setObjectName(QStringLiteral("playerLayout"));
+    m_playerLayout->setContentsMargins(18, 18, 18, 16);
+    m_playerLayout->setSpacing(14);
+
+    m_playerChrome = new QWidget(m_playerCard);
+    m_playerChrome->setObjectName(QStringLiteral("playerChrome"));
+    auto *titleRow = new QHBoxLayout(m_playerChrome);
+    titleRow->setContentsMargins(0, 0, 0, 0);
+    auto *title = new QLabel(QStringLiteral("Live screen"), m_playerChrome);
     title->setObjectName(QStringLiteral("cardTitle"));
     titleRow->addWidget(title);
     titleRow->addStretch();
-    auto *embedded = new QLabel(QStringLiteral("EMBEDDED · D3D11"), playerCard);
+    auto *embedded = new QLabel(QStringLiteral("D3D11 · ZERO COPY"), m_playerChrome);
     embedded->setObjectName(QStringLiteral("miniBadge"));
     titleRow->addWidget(embedded);
-    playerLayout->addLayout(titleRow);
+    m_playerLayout->addWidget(m_playerChrome);
 
-    m_videoSurface = new VideoSurface(playerCard);
-    playerLayout->addWidget(m_videoSurface, 1);
+    m_videoSurface = new VideoSurface(m_playerCard);
+    m_playerLayout->addWidget(m_videoSurface, 1);
 
-    auto *controls = new QHBoxLayout();
-    auto *hint = mutedLabel(QStringLiteral("F11 fullscreen · Esc to return"), playerCard);
+    m_playerControls = new QWidget(m_playerCard);
+    m_playerControls->setObjectName(QStringLiteral("playerControls"));
+    auto *controls = new QHBoxLayout(m_playerControls);
+    controls->setContentsMargins(0, 0, 0, 0);
+    auto *hint = mutedLabel(QStringLiteral("F11 fullscreen · Esc to return"), m_playerControls);
     controls->addWidget(hint);
     controls->addStretch();
-    auto *restart = new QPushButton(QStringLiteral("Restart receiver"), playerCard);
+    auto *restart = new QPushButton(QStringLiteral("Restart receiver"), m_playerControls);
     restart->setObjectName(QStringLiteral("secondaryButton"));
     connect(restart, &QPushButton::clicked, this, &MainWindow::restartReceiver);
     controls->addWidget(restart);
-    m_fullscreenButton = new QPushButton(QStringLiteral("Fullscreen"), playerCard);
-    m_fullscreenButton->setObjectName(QStringLiteral("secondaryButton"));
+    m_fullscreenButton = new QPushButton(QStringLiteral("Fullscreen"), m_playerControls);
+    m_fullscreenButton->setObjectName(QStringLiteral("fullscreenButton"));
     connect(m_fullscreenButton, &QPushButton::clicked, this, &MainWindow::enterFullscreen);
     controls->addWidget(m_fullscreenButton);
-    playerLayout->addLayout(controls);
-    layout->addWidget(playerCard, 1);
+    m_playerLayout->addWidget(m_playerControls);
+    m_playerPageLayout->addWidget(m_playerCard, 1);
 
-    m_sessionPanel = card(page);
+    m_sessionPanel = card(m_playerPage);
     m_sessionPanel->setFixedWidth(286);
     auto *sessionLayout = new QVBoxLayout(m_sessionPanel);
     sessionLayout->setContentsMargins(22, 22, 22, 22);
@@ -291,8 +312,8 @@ QWidget *MainWindow::createPlayerPage() {
     openSettings->setObjectName(QStringLiteral("secondaryButton"));
     connect(openSettings, &QPushButton::clicked, this, [this]() { selectPage(2); });
     sessionLayout->addWidget(openSettings);
-    layout->addWidget(m_sessionPanel);
-    return page;
+    m_playerPageLayout->addWidget(m_sessionPanel);
+    return m_playerPage;
 }
 
 QWidget *MainWindow::createActivityPage() {
@@ -363,15 +384,17 @@ QWidget *MainWindow::createSettingsPage() {
     receiverLayout->addSpacing(8);
     receiverLayout->addWidget(mutedLabel(QStringLiteral("QUALITY PROFILE"), receiverCard));
     m_qualityCombo = new QComboBox(receiverCard);
+    m_qualityCombo->addItem(QStringLiteral("Low latency · 1080p 60 FPS · Recommended"),
+                            static_cast<int>(QualityProfile::LowLatency1080p60));
+    m_qualityCombo->addItem(QStringLiteral("Ultra low latency · 720p 30 FPS · Busy Wi-Fi"),
+                            static_cast<int>(QualityProfile::UltraLowLatency720p30));
     m_qualityCombo->addItem(QStringLiteral("Balanced · 1080p 60 FPS"),
                             static_cast<int>(QualityProfile::Balanced1080p60));
     m_qualityCombo->addItem(QStringLiteral("Efficient · 720p 30 FPS"),
                             static_cast<int>(QualityProfile::Efficient720p30));
-    m_qualityCombo->addItem(QStringLiteral("Low latency · 1080p 60 FPS"),
-                            static_cast<int>(QualityProfile::LowLatency1080p60));
     receiverLayout->addWidget(m_qualityCombo);
     receiverLayout->addWidget(mutedLabel(
-        QStringLiteral("Video always uses the embedded D3D11 renderer so it cannot open a separate window."),
+        QStringLiteral("Low-latency modes prioritize responsiveness. Balanced keeps audio and video synchronized for movies. Video always stays in the embedded D3D11 renderer."),
         receiverCard));
     layout->addWidget(receiverCard);
 
@@ -780,27 +803,73 @@ void MainWindow::setAutostart(bool enabled) {
 void MainWindow::enterFullscreen() {
     if (m_fullscreen) return;
     selectPage(0);
+
+    m_geometryBeforeFullscreen = saveGeometry();
+    m_windowStateBeforeFullscreen = windowState() & ~Qt::WindowFullScreen;
     m_fullscreen = true;
     m_sidebar->hide();
     m_header->hide();
     m_sessionPanel->hide();
-    m_fullscreenButton->setText(QStringLiteral("Exit fullscreen"));
+    m_playerChrome->hide();
+    m_playerControls->hide();
+    m_playerPageLayout->setContentsMargins(0, 0, 0, 0);
+    m_playerPageLayout->setSpacing(0);
+    m_playerLayout->setContentsMargins(0, 0, 0, 0);
+    m_playerLayout->setSpacing(0);
+    m_playerPage->setProperty("fullscreen", true);
+    m_playerCard->setProperty("fullscreen", true);
+    m_videoSurface->setProperty("fullscreen", true);
+    refreshStyle(m_playerPage);
+    refreshStyle(m_playerCard);
+    refreshStyle(m_videoSurface);
+
+    QApplication::setOverrideCursor(Qt::BlankCursor);
+    m_cursorOverride = true;
     showFullScreen();
 }
 
 void MainWindow::exitFullscreen() {
     if (!m_fullscreen) return;
     m_fullscreen = false;
-    showNormal();
+
+    if (m_cursorOverride) {
+        QApplication::restoreOverrideCursor();
+        m_cursorOverride = false;
+    }
+    m_playerPage->setProperty("fullscreen", false);
+    m_playerCard->setProperty("fullscreen", false);
+    m_videoSurface->setProperty("fullscreen", false);
+    m_playerPageLayout->setContentsMargins(30, 24, 30, 30);
+    m_playerPageLayout->setSpacing(20);
+    m_playerLayout->setContentsMargins(18, 18, 18, 16);
+    m_playerLayout->setSpacing(14);
+    refreshStyle(m_playerPage);
+    refreshStyle(m_playerCard);
+    refreshStyle(m_videoSurface);
+
     m_sidebar->show();
     m_header->show();
     m_sessionPanel->show();
+    m_playerChrome->show();
+    m_playerControls->show();
     m_fullscreenButton->setText(QStringLiteral("Fullscreen"));
+
+    if (m_windowStateBeforeFullscreen.testFlag(Qt::WindowMaximized)) {
+        showMaximized();
+    } else {
+        showNormal();
+        if (!m_geometryBeforeFullscreen.isEmpty()) {
+            restoreGeometry(m_geometryBeforeFullscreen);
+        }
+    }
 }
 
 void MainWindow::showFromTray() {
-    if (m_fullscreen) exitFullscreen();
-    showNormal();
+    if (m_fullscreen) {
+        exitFullscreen();
+    } else {
+        showNormal();
+    }
     raise();
     activateWindow();
 }

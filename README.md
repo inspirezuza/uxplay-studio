@@ -14,15 +14,16 @@ UxPlay Studio keeps the receiver, live video, connection status, settings, activ
 ## Highlights
 
 - Embedded AirPlay video in the main app window
-- Same-window fullscreen with `F11` and `Esc`
+- True video-only fullscreen with `F11` and `Esc`; no app chrome or detached window
 - Clear receiver states: starting, ready, connecting, sharing, and recovery
 - Device, resolution, and session-duration status
-- 1080p60, 720p30, and low-latency profiles
+- Responsive 1080p60 and busy-Wi-Fi 720p30 low-latency profiles
 - Optional four-digit PIN for shared Wi-Fi networks
 - Local activity log and copyable diagnostics
 - Bonjour and Bluetooth discovery support
 - Automatic recovery with capped backoff
-- Native Qt 6 UI and hardware-friendly D3D11 rendering
+- Direct3D11 hardware decode, conversion, and display without a CPU frame copy
+- Bounded low-latency buffering that drops stale frames instead of falling farther behind
 - Portable x64 and ARM64 build pipeline
 
 ## Download
@@ -67,11 +68,13 @@ Qt MainWindow
   ├─ Activity, Settings, Diagnostics
   └─ ReceiverEngine state machine
        └─ vendored libuxplay
-            └─ GStreamer d3d11videosink
-                 └─ GstVideoOverlay → VideoSurface HWND
+            └─ GStreamer D3D11 zero-copy pipeline
+                 ├─ d3d11h264dec → 2-frame leaky queue
+                 └─ d3d11convert → d3d11videosink
+                      └─ GstVideoOverlay → VideoSurface HWND
 ```
 
-`ReceiverEngine` is the app-facing seam. UxPlay, GStreamer, worker threads, restart policy, and native video embedding stay behind that interface. Tests exercise configuration and state behavior without needing an AirPlay device.
+`ReceiverEngine` is the app-facing seam. UxPlay, GStreamer, worker threads, restart policy, and native video embedding stay behind that interface. Tests exercise configuration, state behavior, video-surface ownership, and true-fullscreen restoration without needing an AirPlay device.
 
 ## Privacy and security
 

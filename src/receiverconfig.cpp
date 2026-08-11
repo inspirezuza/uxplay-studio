@@ -21,6 +21,8 @@ QStringList ReceiverConfig::uxplayArguments(const QString &bleStatusPath) const 
     QStringList args {
         QStringLiteral("-n"), receiverName.trimmed(),
         QStringLiteral("-nh"),
+        QStringLiteral("-vd"), QStringLiteral("d3d11h264dec"),
+        QStringLiteral("-vc"), QStringLiteral("d3d11convert"),
         QStringLiteral("-vs"), QStringLiteral("d3d11videosink"),
         QStringLiteral("-nofreeze")
     };
@@ -33,6 +35,11 @@ QStringList ReceiverConfig::uxplayArguments(const QString &bleStatusPath) const 
     case QualityProfile::LowLatency1080p60:
         args << QStringLiteral("-s") << QStringLiteral("1920x1080@60")
              << QStringLiteral("-fps") << QStringLiteral("60")
+             << QStringLiteral("-vsync") << QStringLiteral("no");
+        break;
+    case QualityProfile::UltraLowLatency720p30:
+        args << QStringLiteral("-s") << QStringLiteral("1280x720@30")
+             << QStringLiteral("-fps") << QStringLiteral("30")
              << QStringLiteral("-vsync") << QStringLiteral("no");
         break;
     case QualityProfile::Balanced1080p60:
@@ -55,16 +62,26 @@ QString ReceiverConfig::qualityLabel() const {
     case QualityProfile::Balanced1080p60: return QStringLiteral("Balanced · 1080p 60 FPS");
     case QualityProfile::Efficient720p30: return QStringLiteral("Efficient · 720p 30 FPS");
     case QualityProfile::LowLatency1080p60: return QStringLiteral("Low latency · 1080p 60 FPS");
+    case QualityProfile::UltraLowLatency720p30: return QStringLiteral("Ultra low latency · 720p 30 FPS");
     }
-    return QStringLiteral("Balanced · 1080p 60 FPS");
+    return QStringLiteral("Low latency · 1080p 60 FPS");
+}
+
+bool ReceiverConfig::usesLowLatencyPipeline() const {
+    return quality == QualityProfile::LowLatency1080p60
+        || quality == QualityProfile::UltraLowLatency720p30;
 }
 
 ReceiverConfig SettingsStore::load() {
     QSettings settings;
     ReceiverConfig config;
     config.receiverName = settings.value(QStringLiteral("receiver/name"), config.receiverName).toString();
-    config.quality = static_cast<QualityProfile>(
-        settings.value(QStringLiteral("receiver/quality"), static_cast<int>(config.quality)).toInt());
+    const int storedQuality = settings.value(
+        QStringLiteral("receiver/quality"), static_cast<int>(config.quality)).toInt();
+    if (storedQuality >= static_cast<int>(QualityProfile::Balanced1080p60)
+        && storedQuality <= static_cast<int>(QualityProfile::UltraLowLatency720p30)) {
+        config.quality = static_cast<QualityProfile>(storedQuality);
+    }
     config.pinEnabled = settings.value(QStringLiteral("security/pinEnabled"), false).toBool();
     config.pin = settings.value(QStringLiteral("security/pin"), config.pin).toString();
     config.bluetoothDiscovery = settings.value(QStringLiteral("receiver/bluetoothDiscovery"), true).toBool();

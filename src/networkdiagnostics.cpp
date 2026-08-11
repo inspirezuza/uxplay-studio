@@ -68,7 +68,11 @@ QString NetworkDiagnostics::report(const ReceiverConfig &config, quintptr videoW
     stream << "Receiver\n";
     stream << "  Name: " << config.receiverName << "\n";
     stream << "  Quality: " << config.qualityLabel() << "\n";
-    stream << "  Renderer: d3d11videosink (embedded)\n";
+    stream << "  Renderer: Direct3D11 DXVA zero-copy (embedded)\n";
+    stream << "  Frame backlog: "
+           << (config.usesLowLatencyPipeline() ? "Bounded to 2 decoded frames; stale frames drop"
+                                               : "Timestamp-synchronized")
+           << "\n";
     stream << "  Native video handle: 0x" << QString::number(videoWindow, 16) << "\n";
     stream << "  Access control: " << (config.pinEnabled ? "4-digit PIN" : "Open") << "\n";
     stream << "  Bluetooth discovery: " << (config.bluetoothDiscovery ? "Enabled" : "Disabled") << "\n\n";

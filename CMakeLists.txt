@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(UxPlayStudio VERSION 1.0.0 LANGUAGES C CXX)
+project(UxPlayStudio VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -60,3 +60,29 @@ add_executable(test-videosurface tests/test_videosurface.cpp src/videosurface.cp
 target_link_libraries(test-videosurface PRIVATE Qt6::Core Qt6::Widgets Qt6::Test)
 target_include_directories(test-videosurface PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME videosurface COMMAND test-videosurface)
+
+add_executable(test-mainwindow
+    tests/test_mainwindow.cpp
+    src/mainwindow.cpp
+    src/airplayworker.cpp
+    src/receiverengine.cpp
+    src/networkdiagnostics.cpp
+    src/mdns_responder.cpp
+    resources/resources.qrc
+    ${UXPLAY_STUDIO_CORE_SOURCES}
+)
+target_link_libraries(test-mainwindow PRIVATE
+    Qt6::Core
+    Qt6::Widgets
+    Qt6::Network
+    Qt6::Test
+    uxplay
+)
+target_include_directories(test-mainwindow PRIVATE
+    ${CMAKE_SOURCE_DIR}/libuxplay
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_definitions(test-mainwindow PRIVATE
+    UXPLAY_STUDIO_VERSION="${PROJECT_VERSION}"
+)
+add_test(NAME mainwindow COMMAND test-mainwindow)

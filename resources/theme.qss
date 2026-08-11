@@ -34,7 +34,7 @@ QWidget#header {
     border-bottom: 1px solid #202b43;
 }
 QLabel#pageTitle { font-size: 24px; font-weight: 750; color: #ffffff; }
-QWidget#card {
+QWidget#card, QWidget#playerCard {
     background: #111a2d;
     border: 1px solid #24304a;
     border-radius: 16px;
@@ -54,6 +54,15 @@ QWidget#videoSurface, QWidget#nativeVideoTarget {
     border-radius: 12px;
 }
 QWidget#videoPlaceholder { background: #070d1b; border-radius: 12px; }
+QWidget#page[fullscreen="true"],
+QWidget#playerCard[fullscreen="true"],
+QWidget#videoSurface[fullscreen="true"],
+QWidget#videoSurface[fullscreen="true"] QWidget#nativeVideoTarget,
+QWidget#videoSurface[fullscreen="true"] QWidget#videoPlaceholder {
+    background: #000000;
+    border: 0;
+    border-radius: 0;
+}
 QLabel#airplayMark { color: #6c8cff; font-size: 56px; font-weight: 300; }
 QLabel#videoPlaceholderTitle { color: #ffffff; font-size: 24px; font-weight: 700; }
 QLabel#videoPlaceholderDetail { color: #8f9db5; font-size: 14px; }
@@ -78,6 +87,15 @@ QPushButton#secondaryButton {
     padding: 8px 13px;
 }
 QPushButton#secondaryButton:hover { background: #21304d; border-color: #40557d; }
+QPushButton#fullscreenButton {
+    background: #18233a;
+    border: 1px solid #2b3a58;
+    border-radius: 9px;
+    color: #dce5f7;
+    font-weight: 600;
+    padding: 8px 13px;
+}
+QPushButton#fullscreenButton:hover { background: #21304d; border-color: #40557d; }
 QLineEdit, QComboBox {
     background: #0c1426;
     border: 1px solid #30405f;

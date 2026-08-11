@@ -127,61 +127,61 @@ static bool attach_embedded_window(GstElement *video_sink) {
     return true;
 }
 
-static void append_videoflip (GString *launch, const videoflip_t *flip, const videoflip_t *rot) {
-    /* videoflip image transform */
+static const char *video_direction(const videoflip_t *flip, const videoflip_t *rot) {
     switch (*flip) {
     case INVERT:
         switch (*rot)  {
         case LEFT:
-	    g_string_append(launch, "videoflip video-direction=GST_VIDEO_ORIENTATION_90R ! ");
-	    break;
+            return "90r";
         case RIGHT:
-            g_string_append(launch, "videoflip video-direction=GST_VIDEO_ORIENTATION_90L ! ");
-            break;
+            return "90l";
         default:
-	    g_string_append(launch, "videoflip video-direction=GST_VIDEO_ORIENTATION_180 ! ");
-	    break;
+            return "180";
         }
-        break;
     case HFLIP:
         switch (*rot) {
         case LEFT:
-            g_string_append(launch, "videoflip video-direction=GST_VIDEO_ORIENTATION_UL_LR ! ");
-            break;
+            return "ul-lr";
         case RIGHT:
-            g_string_append(launch, "videoflip video-direction=GST_VIDEO_ORIENTATION_UR_LL ! ");
-            break;
+            return "ur-ll";
         default:
-            g_string_append(launch, "videoflip video-direction=GST_VIDEO_ORIENTATION_HORIZ ! ");
-            break;
+            return "horiz";
         }
-        break;
     case VFLIP:
         switch (*rot) {
         case LEFT:
-            g_string_append(launch, "videoflip video-direction=GST_VIDEO_ORIENTATION_UR_LL ! ");
-            break;
+            return "ur-ll";
         case RIGHT:
-            g_string_append(launch, "videoflip video-direction=GST_VIDEO_ORIENTATION_UL_LR ! ");
-            break;
+            return "ul-lr";
         default:
-            g_string_append(launch, "videoflip video-direction=GST_VIDEO_ORIENTATION_VERT ! ");
-	  break;
-	}
-        break;
+            return "vert";
+        }
     default:
         switch (*rot) {
         case LEFT:
-            g_string_append(launch, "videoflip video-direction=GST_VIDEO_ORIENTATION_90L ! ");
-            break;
+            return "90l";
         case RIGHT:
-            g_string_append(launch, "videoflip video-direction=GST_VIDEO_ORIENTATION_90R ! ");
-            break;
+            return "90r";
         default:
-            break;
+            return "identity";
         }
-        break;
     }
+}
+
+static void append_videoflip(GString *launch, const videoflip_t *flip, const videoflip_t *rot) {
+    const char *direction = video_direction(flip, rot);
+    if (strcmp(direction, "identity")) {
+        g_string_append_printf(launch, "videoflip video-direction=%s ! ", direction);
+    }
+}
+
+static bool element_factory_available(const char *name) {
+    GstElementFactory *factory = gst_element_factory_find(name);
+    if (!factory) {
+        return false;
+    }
+    gst_object_unref(factory);
+    return true;
 }
 
 /* apple uses colorimetry that is detected as  1:3:7:1           * //previously 1:3:5:1 was seen
@@ -259,8 +259,22 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
     hls_video = (uri != NULL);
     /* videosink choices that are auto */
     auto_videosink = (strstr(videosink, "autovideosink") || strstr(videosink, "fpsdisplaysink"));
-
     logger = render_logger;
+
+    const bool d3d11_requested = g_str_has_prefix(videosink, "d3d11videosink")
+        && g_str_has_prefix(decoder, "d3d11")
+        && g_str_has_prefix(converter, "d3d11");
+    const bool d3d11_available = d3d11_requested
+        && element_factory_available(decoder)
+        && element_factory_available(converter)
+        && element_factory_available(videosink);
+    const char *effective_decoder = d3d11_available ? decoder : (d3d11_requested ? "decodebin" : decoder);
+    const char *effective_converter = d3d11_available ? converter : (d3d11_requested ? "videoconvert" : converter);
+    if (d3d11_requested && !d3d11_available) {
+        logger_log(logger, LOGGER_WARNING,
+                   "D3D11 zero-copy elements are unavailable; falling back to automatic decoding");
+    }
+
     logger_debug = (logger_get_level(logger) >= LOGGER_DEBUG);
     hls_seek_enabled = FALSE;
     hls_playing = FALSE;
@@ -358,15 +372,27 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
             } else {
                 g_assert(0);
             }
-            GString *launch = g_string_new("appsrc name=video_source ! ");
+            const bool low_latency_pipeline = !video_sync && !rtp && !jpeg_pipeline;
+            const bool codec_d3d11_available = d3d11_available
+                && (i != type_265 || element_factory_available("d3d11h265dec"));
+            const bool d3d11_pipeline = codec_d3d11_available && !rtp && !jpeg_pipeline;
+            const char *pipeline_decoder = codec_d3d11_available
+                ? effective_decoder : (d3d11_requested ? "decodebin" : effective_decoder);
+            const char *pipeline_converter = (jpeg_pipeline || !codec_d3d11_available)
+                && d3d11_requested ? "videoconvert" : effective_converter;
+            GString *launch = low_latency_pipeline
+                ? g_string_new("appsrc name=video_source is-live=true block=false max-buffers=4 max-bytes=0 max-time=0 leaky-type=downstream ! ")
+                : g_string_new("appsrc name=video_source ! ");
             if (jpeg_pipeline) {
                 g_string_append(launch, "jpegdec ");
             } else {
-                g_string_append(launch, "queue ! ");
+                if (!low_latency_pipeline) {
+                    g_string_append(launch, "queue ! ");
+                }
                 g_string_append(launch, parser);
                 g_string_append(launch, " ! ");
                 if (!rtp) {
-                    g_string_append(launch, decoder);
+                    g_string_append(launch, pipeline_decoder);
                 } else {
                     g_string_append(launch, "rtph264pay ");
                     g_string_append(launch, rtp_pipeline);
@@ -374,10 +400,19 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
             }
             if (!rtp || jpeg_pipeline) {
                 g_string_append(launch, " ! ");
-                append_videoflip(launch, &videoflip[0], &videoflip[1]);
-                g_string_append(launch, converter);
-                g_string_append(launch, " ! ");
-                g_string_append(launch, "videoscale ! ");
+                if (low_latency_pipeline) {
+                    g_string_append(launch,
+                        "queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream ! ");
+                }
+                if (d3d11_pipeline) {
+                    g_string_append(launch, effective_converter);
+                    g_string_append_printf(launch, " video-direction=%s ! ",
+                                           video_direction(&videoflip[0], &videoflip[1]));
+                } else {
+                    append_videoflip(launch, &videoflip[0], &videoflip[1]);
+                    g_string_append(launch, pipeline_converter);
+                    g_string_append(launch, " ! videoscale ! ");
+                }
                 if (jpeg_pipeline) {
                     g_string_append(launch, " imagefreeze allow-replace=TRUE ! textoverlay name=metadata_overlay ! ");
                 }
@@ -436,6 +471,12 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                     gst_object_unref(embedded_sink);
                 }
                 g_string_free(sink_name, TRUE);
+            }
+
+            if (d3d11_pipeline) {
+                logger_log(logger, LOGGER_INFO,
+                           "Using Direct3D11 zero-copy video decoding and conversion%s",
+                           low_latency_pipeline ? " with bounded low-latency buffering" : "");
             }
             GstClock *clock = gst_system_clock_obtain();
             g_object_set(clock, "clock-type", GST_CLOCK_TYPE_REALTIME, NULL);

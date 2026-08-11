@@ -92,7 +92,7 @@ int main(int argc, char *argv[]) {
     app.setOrganizationDomain(QStringLiteral("github.com/inspirezuza"));
     app.setApplicationName(QStringLiteral("UxPlay Studio"));
     app.setApplicationDisplayName(QStringLiteral("UxPlay Studio"));
-    app.setApplicationVersion(QStringLiteral("1.0.0"));
+    app.setApplicationVersion(QStringLiteral(UXPLAY_STUDIO_VERSION));
     app.setWindowIcon(QIcon(QDir(QApplication::applicationDirPath())
                                 .filePath(QStringLiteral("resources/icon.ico"))));
 
