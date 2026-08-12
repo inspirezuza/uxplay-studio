@@ -7,6 +7,8 @@
 #include <QObject>
 #include <QPointer>
 
+class QImage;
+
 class ReceiverEngine final : public QObject {
     Q_OBJECT
 
@@ -23,6 +25,7 @@ public:
 signals:
     void stateChanged(ReceiverState state);
     void eventReceived(const ReceiverEvent &event);
+    void previewFrame(const QImage &frame);
     void recoveryScheduled(int delayMs);
 
 private:

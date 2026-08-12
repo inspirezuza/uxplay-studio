@@ -71,6 +71,8 @@ public:
     }
 
     QString layerId() const { return m_layerId; }
+    QString sourceId() const { return m_source.id; }
+    void setPreview(const QImage &preview) { m_preview = preview; update(); }
 
     QRectF boundingRect() const override {
         return QGraphicsRectItem::boundingRect().adjusted(-18, -36, 18, 18);
@@ -99,9 +101,24 @@ public:
         painter->fillRect(visible, fill);
         if (m_source.type == SceneSourceType::Image) {
             const QImage image(m_source.uri);
-            if (!image.isNull()) painter->drawImage(visible, image);
+            if (!image.isNull()) {
+                const QRectF sourceRect(image.width() * m_crop.left(),
+                                        image.height() * m_crop.top(),
+                                        image.width() * (1.0 - m_crop.left() - m_crop.right()),
+                                        image.height() * (1.0 - m_crop.top() - m_crop.bottom()));
+                if (sourceRect.isValid()) painter->drawImage(visible, image, sourceRect);
+            }
         }
-        if (m_source.type == SceneSourceType::AirPlay || m_source.type == SceneSourceType::Camera) {
+        if ((m_source.type == SceneSourceType::AirPlay || m_source.type == SceneSourceType::Camera) &&
+            !m_preview.isNull()) {
+            const QRectF sourceRect(m_preview.width() * m_crop.left(),
+                                    m_preview.height() * m_crop.top(),
+                                    m_preview.width() * (1.0 - m_crop.left() - m_crop.right()),
+                                    m_preview.height() * (1.0 - m_crop.top() - m_crop.bottom()));
+            if (sourceRect.isValid()) painter->drawImage(visible, m_preview, sourceRect);
+        }
+        if ((m_source.type == SceneSourceType::AirPlay || m_source.type == SceneSourceType::Camera) &&
+            m_preview.isNull()) {
             QLinearGradient gradient(visible.topLeft(), visible.bottomRight());
             gradient.setColorAt(0, QColor(255, 255, 255, 28));
             gradient.setColorAt(1, QColor(0, 0, 0, 38));
@@ -112,8 +129,8 @@ public:
         font.setPixelSize(qBound(16, static_cast<int>(content.height() / 12), 44));
         font.setWeight(QFont::DemiBold);
         painter->setFont(font);
-        if (m_source.type == SceneSourceType::AirPlay || m_source.type == SceneSourceType::Camera ||
-            m_source.type == SceneSourceType::Text)
+        if (((m_source.type == SceneSourceType::AirPlay || m_source.type == SceneSourceType::Camera) &&
+             m_preview.isNull()) || m_source.type == SceneSourceType::Text)
             painter->drawText(visible.adjusted(18, 18, -18, -18),
                               Qt::AlignCenter | Qt::TextWordWrap, m_source.name);
         painter->restore();
@@ -162,6 +179,7 @@ public:
 private:
     QString m_layerId;
     SceneSource m_source;
+    QImage m_preview;
     QMarginsF m_crop;
     SceneMask m_mask = SceneMask::None;
 };
@@ -311,6 +329,14 @@ bool SceneCanvas::snapEnabled() const { return m_snapEnabled; }
 QUndoStack *SceneCanvas::undoStack() { return &m_undoStack; }
 void SceneCanvas::refreshFromDocument() { syncItemsFromDocument(); }
 
+void SceneCanvas::setSourcePreview(const QString &sourceId, const QImage &frame) {
+    if (sourceId.isEmpty() || frame.isNull()) return;
+    m_sourcePreviews.insert(sourceId, frame);
+    for (LayerItem *item : m_items) {
+        if (item->sourceId() == sourceId) item->setPreview(frame);
+    }
+}
+
 void SceneCanvas::rebuild() {
     const QStringList selected = selectedLayerIds();
     m_scene->clear();
@@ -324,6 +350,7 @@ void SceneCanvas::rebuild() {
         const SceneSource *source = m_document->source(layer.sourceId);
         if (!source) continue;
         auto *item = new LayerItem(layer.id, *source);
+        if (m_sourcePreviews.contains(source->id)) item->setPreview(m_sourcePreviews.value(source->id));
         m_scene->addItem(item);
         item->sync(layer, i);
         m_items.insert(layer.id, item);

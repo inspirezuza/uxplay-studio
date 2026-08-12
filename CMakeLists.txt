@@ -68,8 +68,11 @@ target_include_directories(test-receiverconfig PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME receiverconfig COMMAND test-receiverconfig)
 
 add_executable(test-videosurface tests/test_videosurface.cpp src/videosurface.cpp)
-target_link_libraries(test-videosurface PRIVATE Qt6::Core Qt6::Widgets Qt6::Test)
-target_include_directories(test-videosurface PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test-videosurface PRIVATE Qt6::Core Qt6::Widgets Qt6::Test uxplay)
+target_include_directories(test-videosurface PRIVATE
+    ${CMAKE_SOURCE_DIR}/libuxplay
+    ${CMAKE_SOURCE_DIR}/src
+)
 add_test(NAME videosurface COMMAND test-videosurface)
 
 add_executable(test-mainwindow
@@ -137,7 +140,10 @@ add_executable(test-recordingsession
     src/studio/scenedocument.cpp
 )
 target_link_libraries(test-recordingsession PRIVATE Qt6::Core Qt6::Test uxplay)
-target_include_directories(test-recordingsession PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(test-recordingsession PRIVATE
+    ${CMAKE_SOURCE_DIR}/libuxplay
+    ${CMAKE_SOURCE_DIR}/src
+)
 add_test(NAME recordingsession COMMAND test-recordingsession)
 
 add_executable(test-exportpipeline

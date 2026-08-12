@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMutexLocker>
 #include <QSaveFile>
 #include <QUuid>
 #include <algorithm>
@@ -57,11 +58,17 @@ ProjectCreateResult ProjectStore::create(const SceneDocument &document) {
         !dir.mkpath(info.exportsDirectory())) {
         return {{}, QStringLiteral("Could not create the local project folders")};
     }
+    QMutexLocker lock(&m_manifestMutex);
     const QString error = writeManifest(info, document);
     return error.isEmpty() ? ProjectCreateResult{info, {}} : ProjectCreateResult{{}, error};
 }
 
 ProjectLoadResult ProjectStore::load(const QString &directory) const {
+    QMutexLocker lock(&m_manifestMutex);
+    return loadUnlocked(directory);
+}
+
+ProjectLoadResult ProjectStore::loadUnlocked(const QString &directory) const {
     const QString cleanDirectory = QDir::cleanPath(directory);
     QFile file(QDir(cleanDirectory).filePath(QStringLiteral("project.json")));
     if (!file.open(QIODevice::ReadOnly)) {
@@ -88,8 +95,9 @@ ProjectLoadResult ProjectStore::load(const QString &directory) const {
 }
 
 QString ProjectStore::save(const ProjectInfo &project, const SceneDocument &document) const {
+    QMutexLocker lock(&m_manifestMutex);
     ProjectInfo updated = project;
-    const ProjectLoadResult current = load(project.directory);
+    const ProjectLoadResult current = loadUnlocked(project.directory);
     if (current.ok()) {
         updated.state = current.project.state;
         updated.createdAtUtc = current.project.createdAtUtc;
@@ -100,7 +108,8 @@ QString ProjectStore::save(const ProjectInfo &project, const SceneDocument &docu
 }
 
 QString ProjectStore::setState(const QString &directory, ProjectState state) {
-    auto loaded = load(directory);
+    QMutexLocker lock(&m_manifestMutex);
+    auto loaded = loadUnlocked(directory);
     if (!loaded.ok()) return loaded.error;
     loaded.project.state = state;
     loaded.project.updatedAtUtc = QDateTime::currentDateTimeUtc();
@@ -123,10 +132,11 @@ QList<ProjectSummary> ProjectStore::projects() const {
 }
 
 QList<ProjectSummary> ProjectStore::recoverableProjects() {
+    QMutexLocker lock(&m_manifestMutex);
     QList<ProjectSummary> result;
     QDir root(m_rootDirectory);
     for (const QString &name : root.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
-        auto loaded = load(root.filePath(name));
+        auto loaded = loadUnlocked(root.filePath(name));
         if (!loaded.ok()) continue;
         if (loaded.project.state == ProjectState::Recording ||
             loaded.project.state == ProjectState::Finalizing ||

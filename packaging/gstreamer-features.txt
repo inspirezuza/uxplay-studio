@@ -1,5 +1,6 @@
 # Core pipeline elements
 appsrc
+appsink
 queue
 filesink
 fakesink
@@ -35,8 +36,13 @@ d3d12videosink
 
 # Cover art, metadata, rotation and recording
 jpegdec
+pngdec
+webpdec
+gdkpixbufdec
 imagefreeze
 textoverlay
+videotestsrc
+videorate
 videoflip
 videocrop
 rotate

@@ -4,6 +4,7 @@
 
 #include <QGraphicsView>
 #include <QHash>
+#include <QImage>
 #include <QStringList>
 #include <QUndoStack>
 
@@ -35,6 +36,7 @@ public:
     bool snapEnabled() const;
     QUndoStack *undoStack();
     void refreshFromDocument();
+    void setSourcePreview(const QString &sourceId, const QImage &frame);
 
 signals:
     void sceneChanged();
@@ -66,6 +68,7 @@ private:
     SceneDocument *m_document = nullptr;
     SceneFormat m_format = SceneFormat::Wide;
     QHash<QString, LayerItem *> m_items;
+    QHash<QString, QImage> m_sourcePreviews;
     QUndoStack m_undoStack;
     bool m_snapEnabled = true;
     Interaction m_interaction = Interaction::None;

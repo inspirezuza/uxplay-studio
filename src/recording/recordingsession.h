@@ -46,7 +46,6 @@ signals:
 private:
     void transition(RecordingState state);
     bool writeSessionManifest(const RecordingOptions &options, const QStringList &tracks);
-    QString videoPipeline(const RecordingOptions &options) const;
     QString audioPipeline(bool loopback) const;
     QString cameraPipeline() const;
 
@@ -56,5 +55,4 @@ private:
     RecordingState m_state = RecordingState::Idle;
     QString m_lastError;
     QStringList m_warnings;
-    quint64 m_captureMonitorHandle = 0;
 };

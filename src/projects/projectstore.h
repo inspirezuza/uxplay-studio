@@ -4,6 +4,7 @@
 
 #include <QDateTime>
 #include <QList>
+#include <QMutex>
 #include <QString>
 #include <memory>
 
@@ -64,8 +65,10 @@ public:
     QList<ProjectSummary> recoverableProjects();
 
 private:
+    ProjectLoadResult loadUnlocked(const QString &directory) const;
     QString writeManifest(const ProjectInfo &project, const SceneDocument &document) const;
     QString m_rootDirectory;
+    mutable QMutex m_manifestMutex;
 };
 
 QString projectStateKey(ProjectState state);

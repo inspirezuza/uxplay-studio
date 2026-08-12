@@ -19,8 +19,10 @@ private slots:
         SceneTransform t;
         t.frame = QRectF(50, 100, 900, 1400);
         t.opacity = .8;
+        t.crop = QMarginsF(.1, .05, .1, .05);
         QVERIFY(scene.setTransform(SceneFormat::Vertical, airplayLayer, t));
         t.frame = QRectF(700, 1510, 320, 320);
+        t.crop = {};
         t.mask = SceneMask::Circle;
         QVERIFY(scene.setTransform(SceneFormat::Vertical, cameraLayer, t));
 
@@ -38,7 +40,8 @@ private slots:
                                                   temp.path() + "/out.mp4");
         QVERIFY2(built.ok(), qPrintable(built.error));
         QVERIFY(built.description.contains("width=1080,height=1920"));
-        QVERIFY(built.description.contains("sink_0::xpos=50"));
+        QVERIFY(built.description.contains("video/x-raw,width=720,height=1260"));
+        QVERIFY(built.description.contains("sink_0::xpos=140"));
         QVERIFY(built.description.contains("sink_0::alpha=0.8"));
         QVERIFY(built.description.contains("sink_1::xpos=700"));
         QVERIFY(built.description.contains("mp4mux"));

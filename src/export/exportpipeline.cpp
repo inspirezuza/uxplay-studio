@@ -17,6 +17,17 @@ QString firstPattern(const QString &directory, const QString &prefix, const QStr
     return QDir(directory).filePath(prefix + QStringLiteral("-*.") + suffix);
 }
 
+QString videoSource(const QString &directory, const QString &prefix) {
+    const QStringList segments = QDir(directory).entryList(
+        {prefix + QStringLiteral("-*.mkv")}, QDir::Files, QDir::Name);
+    if (segments.size() == 1) {
+        return QStringLiteral("filesrc location=%1 ! decodebin")
+            .arg(quote(QDir(directory).filePath(segments.first())));
+    }
+    return QStringLiteral("splitmuxsrc location=%1 ! decodebin")
+        .arg(quote(firstPattern(directory, prefix, QStringLiteral("mkv"))));
+}
+
 bool hasTrack(const QString &directory, const QString &prefix, const QString &suffix) {
     return !QDir(directory).entryList({prefix + QStringLiteral("-*.") + suffix}, QDir::Files).isEmpty();
 }
@@ -48,12 +59,10 @@ ExportPipelineResult ExportPipeline::build(const ProjectInfo &project,
         }
         if (source->type == SceneSourceType::AirPlay &&
             hasTrack(project.airplayDirectory(), QStringLiteral("video"), QStringLiteral("mkv"))) {
-            sourcePipeline = QStringLiteral("splitmuxsrc location=%1 ! decodebin")
-                .arg(quote(firstPattern(project.airplayDirectory(), "video", "mkv")));
+            sourcePipeline = videoSource(project.airplayDirectory(), QStringLiteral("video"));
         } else if (source->type == SceneSourceType::Camera &&
                    hasTrack(project.presenterDirectory(), QStringLiteral("camera"), QStringLiteral("mkv"))) {
-            sourcePipeline = QStringLiteral("splitmuxsrc location=%1 ! decodebin")
-                .arg(quote(firstPattern(project.presenterDirectory(), "camera", "mkv")));
+            sourcePipeline = videoSource(project.presenterDirectory(), QStringLiteral("camera"));
         } else if (source->type == SceneSourceType::Image && QFileInfo::exists(source->uri)) {
             sourcePipeline = QStringLiteral(
                 "filesrc location=%1 ! decodebin ! imagefreeze num-buffers=%2 "
@@ -74,14 +83,15 @@ ExportPipelineResult ExportPipeline::build(const ProjectInfo &project,
         } else {
             continue;
         }
-        const int width = qMax(2, static_cast<int>(frame.width()) & ~1);
-        const int height = qMax(2, static_cast<int>(frame.height()) & ~1);
-        const int cropLeft = qBound(0, qRound(width * layer.transform.crop.left()), width - 2);
-        const int cropRight = qBound(0, qRound(width * layer.transform.crop.right()), width - cropLeft - 2);
-        const int cropTop = qBound(0, qRound(height * layer.transform.crop.top()), height - 2);
-        const int cropBottom = qBound(0, qRound(height * layer.transform.crop.bottom()), height - cropTop - 2);
-        QString effects = QStringLiteral(" ! videocrop left=%1 right=%2 top=%3 bottom=%4")
-            .arg(cropLeft).arg(cropRight).arg(cropTop).arg(cropBottom);
+        const int frameWidth = qMax(2, static_cast<int>(frame.width()) & ~1);
+        const int frameHeight = qMax(2, static_cast<int>(frame.height()) & ~1);
+        const int cropLeft = qBound(0, qRound(frameWidth * layer.transform.crop.left()), frameWidth - 2);
+        const int cropRight = qBound(0, qRound(frameWidth * layer.transform.crop.right()), frameWidth - cropLeft - 2);
+        const int cropTop = qBound(0, qRound(frameHeight * layer.transform.crop.top()), frameHeight - 2);
+        const int cropBottom = qBound(0, qRound(frameHeight * layer.transform.crop.bottom()), frameHeight - cropTop - 2);
+        const int visibleWidth = qMax(2, (frameWidth - cropLeft - cropRight) & ~1);
+        const int visibleHeight = qMax(2, (frameHeight - cropTop - cropBottom) & ~1);
+        QString effects;
         if (!qFuzzyIsNull(layer.transform.rotationDegrees)) {
             effects += QStringLiteral(" ! videoconvert ! video/x-raw,format=BGRA ! rotate angle=%1")
                 .arg(qDegreesToRadians(layer.transform.rotationDegrees), 0, 'f', 8);
@@ -93,7 +103,7 @@ ExportPipelineResult ExportPipeline::build(const ProjectInfo &project,
                 .arg(pad);
         }
         inputs << QStringLiteral("%1 ! queue ! videoconvert ! videoscale ! video/x-raw,width=%2,height=%3%4 ! comp.sink_%5 ")
-            .arg(sourcePipeline).arg(width).arg(height).arg(effects).arg(pad);
+            .arg(sourcePipeline).arg(visibleWidth).arg(visibleHeight).arg(effects).arg(pad);
         inputs << QStringLiteral("compositor name=comp sink_%1::xpos=%2 sink_%1::ypos=%3 sink_%1::alpha=%4 ")
             .arg(pad).arg(qRound(frame.x()) + cropLeft).arg(qRound(frame.y()) + cropTop)
             .arg(layer.transform.opacity, 0, 'f', 3);

@@ -25,9 +25,7 @@ Select optional camera and microphone tracks, then press **Record** while an iPa
 - presenter camera, when enabled
 - presenter microphone, when enabled
 
-Video encoding uses the Windows Media Foundation H.264 path. Each track is bounded and segmented every 30 seconds. Recording runs beside—not inside—the live AirPlay renderer, so the receiver can keep dropping stale frames instead of accumulating latency.
-
-The capture follows window movement and resizing, including true fullscreen, while staying on the same monitor. Keep the Studio window on one monitor for a recording; moving it to another monitor raises a warning so the existing track is not silently corrupted.
+The AirPlay track records the encoded stream directly before display, so it stays isolated from window movement, fullscreen, page changes, or other windows covering Studio. Camera and microphone tracks are recorded independently, and every track is segmented every 30 seconds. Recording does not add work to the low-latency display path. The editor uses bounded live or recorded preview frames so transforms reflect the media that will be exported.
 
 If an optional device is unavailable, the main AirPlay recording continues and the Studio shows a warning. The AirPlay video track is required.
 

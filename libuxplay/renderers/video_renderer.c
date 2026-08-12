@@ -22,6 +22,7 @@
 
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
+#include <gst/app/gstappsink.h>
 #include <gst/video/videooverlay.h>
 #include "video_renderer.h"
 
@@ -47,6 +48,8 @@ static bool use_x11 = false;
 #endif
 static bool logger_debug = false;
 static uintptr_t embedded_window_handle = 0;
+static void (*preview_sample_callback)(GstSample *, void *) = NULL;
+static void *preview_sample_context = NULL;
 static gint64 hls_requested_start_position = 0;
 static gint64 hls_seek_start = 0;
 static gint64 hls_seek_end = 0;
@@ -105,6 +108,21 @@ static char jpeg[] = "jpeg";
 
 void video_renderer_set_window_handle(uintptr_t window_handle) {
     embedded_window_handle = window_handle;
+}
+
+void video_renderer_set_preview_sample_callback(void (*callback)(GstSample *, void *), void *context) {
+    preview_sample_callback = callback;
+    preview_sample_context = context;
+}
+
+static GstFlowReturn preview_new_sample(GstAppSink *sink, gpointer user_data) {
+    (void) user_data;
+    GstSample *sample = gst_app_sink_pull_sample(sink);
+    if (sample) {
+        if (preview_sample_callback) preview_sample_callback(sample, preview_sample_context);
+        gst_sample_unref(sample);
+    }
+    return GST_FLOW_OK;
 }
 
 static bool attach_embedded_window(GstElement *video_sink) {
@@ -435,6 +453,17 @@ bool video_renderer_init(logger_t *render_logger, const char *server_name, video
                     g_string_append(launch, pipeline_converter);
                     g_string_append(launch, " ! videoscale ! ");
                 }
+                if (!jpeg_pipeline) {
+                    g_string_append(launch, "tee name=studio_preview_tee ");
+                    g_string_append(launch,
+                        "studio_preview_tee. ! queue leaky=downstream max-size-buffers=1 ! ");
+                    if (d3d11_pipeline) g_string_append(launch, "d3d11download ! ");
+                    g_string_append(launch,
+                        "videoconvert ! videoscale ! videorate max-rate=15 drop-only=true ! "
+                        "video/x-raw,format=BGRA,width=960 ! "
+                        "appsink name=studio_preview_sink emit-signals=true sync=false max-buffers=1 drop=true "
+                        "studio_preview_tee. ! queue leaky=downstream max-size-buffers=1 ! ");
+                }
                 if (jpeg_pipeline) {
                     g_string_append(launch, " imagefreeze allow-replace=TRUE ! textoverlay name=metadata_overlay ! ");
                 }
@@ -523,6 +552,11 @@ bool video_renderer_init(logger_t *render_logger, const char *server_name, video
             renderer_type[i]->appsrc = gst_bin_get_by_name (GST_BIN (renderer_type[i]->pipeline), "video_source");
             g_assert(renderer_type[i]->appsrc);
             g_object_set(renderer_type[i]->appsrc, "caps", caps, "stream-type", 0, "is-live", TRUE, "format", GST_FORMAT_TIME, NULL);
+            GstElement *preview_sink = gst_bin_get_by_name(GST_BIN(renderer_type[i]->pipeline), "studio_preview_sink");
+            if (preview_sink) {
+                g_signal_connect(preview_sink, "new-sample", G_CALLBACK(preview_new_sample), NULL);
+                gst_object_unref(preview_sink);
+            }
             g_string_free(launch, TRUE);
             gst_caps_unref(caps);
             gst_object_unref(clock);

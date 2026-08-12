@@ -75,6 +75,8 @@ void ReceiverEngine::launchWorker() {
     worker->configure(m_config.uxplayArguments(m_bleStatusPath), m_videoWindow);
     connect(worker, &AirPlayWorker::receiverEvent, this, &ReceiverEngine::handleEvent,
             Qt::QueuedConnection);
+    connect(worker, &AirPlayWorker::previewFrame, this, &ReceiverEngine::previewFrame,
+            Qt::QueuedConnection);
     connect(worker, &AirPlayWorker::engineExited, this, &ReceiverEngine::handleWorkerExit,
             Qt::QueuedConnection);
     connect(worker, &QThread::finished, this, &ReceiverEngine::handleWorkerFinished,

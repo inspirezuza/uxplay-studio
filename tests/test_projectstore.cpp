@@ -1,8 +1,11 @@
 #include "projects/projectstore.h"
 
 #include <QFile>
+#include <QThread>
 #include <QTemporaryDir>
 #include <QtTest>
+
+#include <atomic>
 
 class ProjectStoreTest final : public QObject {
     Q_OBJECT
@@ -70,6 +73,41 @@ private slots:
         QVERIFY(loaded.ok());
         QCOMPARE(loaded.project.state, ProjectState::Recording);
         QCOMPARE(loaded.document->title(), QStringLiteral("Edited while recording"));
+    }
+
+    void concurrentStateAndSceneUpdatesPreserveBoth() {
+        QTemporaryDir root;
+        ProjectStore store(root.path());
+        SceneDocument document;
+        const auto created = store.create(document);
+        QVERIFY(created.ok());
+
+        SceneDocument edited;
+        edited.setTitle(QStringLiteral("Concurrent canvas edit"));
+        std::atomic_bool stateOk{true};
+        std::atomic_bool sceneOk{true};
+        QThread *stateThread = QThread::create([&]() {
+            for (int i = 0; i < 100; ++i)
+                if (!store.setState(created.project.directory, ProjectState::Exporting).isEmpty())
+                    stateOk = false;
+        });
+        QThread *sceneThread = QThread::create([&]() {
+            for (int i = 0; i < 100; ++i)
+                if (!store.save(created.project, edited).isEmpty()) sceneOk = false;
+        });
+        stateThread->start();
+        sceneThread->start();
+        QVERIFY(stateThread->wait(10000));
+        QVERIFY(sceneThread->wait(10000));
+        delete stateThread;
+        delete sceneThread;
+        QVERIFY(stateOk.load());
+        QVERIFY(sceneOk.load());
+
+        const auto loaded = store.load(created.project.directory);
+        QVERIFY(loaded.ok());
+        QCOMPARE(loaded.project.state, ProjectState::Exporting);
+        QCOMPARE(loaded.document->title(), QStringLiteral("Concurrent canvas edit"));
     }
 };
 

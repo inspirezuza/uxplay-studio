@@ -13,6 +13,33 @@
 #include <gst/video/video.h>
 
 namespace {
+qint64 discoverTimelineDuration(const ProjectInfo &project) {
+    qint64 durationNanoseconds = 0;
+    QHash<QString, qint64> trackDurations;
+    for (const QString &directory : {project.airplayDirectory(), project.presenterDirectory()}) {
+        QDirIterator files(directory, {QStringLiteral("*.mkv"), QStringLiteral("*.mka")}, QDir::Files);
+        while (files.hasNext()) {
+            const QString path = files.next();
+            GstDiscoverer *discoverer = gst_discoverer_new(3 * GST_SECOND, nullptr);
+            if (!discoverer) continue;
+            const QByteArray uri = QUrl::fromLocalFile(path).toEncoded();
+            GError *error = nullptr;
+            GstDiscovererInfo *info = gst_discoverer_discover_uri(discoverer, uri.constData(), &error);
+            if (info) {
+                QString trackKey = QFileInfo(path).completeBaseName();
+                trackKey.remove(QRegularExpression(QStringLiteral("-\\d+$")));
+                trackKey = directory + QLatin1Char('/') + trackKey;
+                trackDurations[trackKey] += static_cast<qint64>(gst_discoverer_info_get_duration(info));
+                gst_discoverer_info_unref(info);
+            }
+            if (error) g_error_free(error);
+            gst_object_unref(discoverer);
+        }
+    }
+    for (qint64 duration : trackDurations) durationNanoseconds = qMax(durationNanoseconds, duration);
+    return durationNanoseconds;
+}
+
 void roundedRectangle(cairo_t *context, double width, double height, double radius) {
     constexpr double pi = 3.14159265358979323846;
     cairo_new_sub_path(context);
@@ -74,35 +101,14 @@ bool ExportJob::isRunning() const { return m_thread && m_thread->isRunning(); }
 bool ExportJob::start(const ProjectInfo &project, const SceneDocument &scene,
                       SceneFormat format, const QString &outputPath) {
     if (isRunning() || !m_store) return false;
-    qint64 durationNanoseconds = 0;
-    QHash<QString, qint64> trackDurations;
-    for (const QString &directory : {project.airplayDirectory(), project.presenterDirectory()}) {
-        QDirIterator files(directory, {QStringLiteral("*.mkv"), QStringLiteral("*.mka")}, QDir::Files);
-        while (files.hasNext()) {
-            const QString path = files.next();
-            GstDiscoverer *discoverer = gst_discoverer_new(3 * GST_SECOND, nullptr);
-            if (!discoverer) continue;
-            const QByteArray uri = QUrl::fromLocalFile(path).toEncoded();
-            GError *error = nullptr;
-            GstDiscovererInfo *info = gst_discoverer_discover_uri(discoverer, uri.constData(), &error);
-            if (info) {
-                QString trackKey = QFileInfo(path).completeBaseName();
-                trackKey.remove(QRegularExpression(QStringLiteral("-\\d+$")));
-                trackKey = directory + QLatin1Char('/') + trackKey;
-                trackDurations[trackKey] += static_cast<qint64>(gst_discoverer_info_get_duration(info));
-                gst_discoverer_info_unref(info);
-            }
-            if (error) g_error_free(error);
-            gst_object_unref(discoverer);
-        }
+    const QString stateError = m_store->setState(project.directory, ProjectState::Exporting);
+    if (!stateError.isEmpty()) {
+        emit failed(stateError);
+        return false;
     }
-    for (qint64 duration : trackDurations) durationNanoseconds = qMax(durationNanoseconds, duration);
-    const auto built = ExportPipeline::build(project, scene, format, outputPath, durationNanoseconds);
-    if (!built.ok()) { emit failed(built.error); return false; }
-    m_store->setState(project.directory, ProjectState::Exporting);
     emit started(outputPath);
-    const QString pipelineDescription = built.description;
-    m_thread = QThread::create([this, project, outputPath, pipelineDescription]() {
+    const QJsonObject sceneSnapshot = scene.toJson();
+    m_thread = QThread::create([this, project, outputPath, sceneSnapshot, format]() {
         GError *initError = nullptr;
         if (!gst_is_initialized()) gst_init_check(nullptr, nullptr, &initError);
         if (initError) {
@@ -112,6 +118,21 @@ bool ExportJob::start(const ProjectInfo &project, const SceneDocument &scene,
             emit failed(error);
             return;
         }
+        auto sceneResult = SceneDocument::fromJson(sceneSnapshot);
+        if (!sceneResult.has_value()) {
+            m_store->setState(project.directory, ProjectState::Failed);
+            emit failed(sceneResult.error);
+            return;
+        }
+        const qint64 durationNanoseconds = discoverTimelineDuration(project);
+        const auto built = ExportPipeline::build(project, *sceneResult.document, format,
+                                                  outputPath, durationNanoseconds);
+        if (!built.ok()) {
+            m_store->setState(project.directory, ProjectState::Failed);
+            emit failed(built.error);
+            return;
+        }
+        const QString pipelineDescription = built.description;
         GError *parseError = nullptr;
         GstElement *pipeline = gst_parse_launch(pipelineDescription.toUtf8().constData(), &parseError);
         if (!pipeline || parseError) {

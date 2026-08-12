@@ -92,7 +92,7 @@ Qt MainWindow
                       └─ GstVideoOverlay → VideoSurface HWND
 ```
 
-`ReceiverEngine` remains the low-latency app-facing seam. Recording observes the native video surface through a separate bounded GPU capture pipeline and never inserts work into UxPlay's decode/render pipeline. Project manifests are written atomically; media is segmented every 30 seconds so an interrupted session can retain finalized segments. Tests cover state/configuration, native ownership, fullscreen restoration, scene transforms and persistence, recovery, pipeline parsing, and a real two-track masked MP4 export.
+`ReceiverEngine` remains the low-latency app-facing seam. Recording muxes the encoded AirPlay stream directly before display, so window movement, fullscreen, page changes, and occlusion never leak into the media file or add work to the decode/render path. The editor receives bounded live/recorded preview frames. Project manifest transactions are serialized and written atomically; every recorded track is segmented every 30 seconds so an interrupted session can retain finalized media. Tests cover state/configuration, native ownership, fullscreen restoration, scene transforms and persistence, recovery, pipeline parsing, direct AirPlay muxing, and a real two-track masked MP4 export.
 
 ## Privacy and security
 

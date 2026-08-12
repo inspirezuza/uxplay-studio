@@ -26,6 +26,7 @@ class QPushButton;
 class QStackedWidget;
 class QSystemTrayIcon;
 class QTextEdit;
+class QThread;
 class QVBoxLayout;
 class QWidget;
 class ReceiverEngine;
@@ -72,6 +73,7 @@ private:
     void exportCurrentProject();
     void saveCurrentProject();
     void refreshRecordingCapture();
+    void loadRecordedPreviews(const ProjectInfo &project);
 
     void startReceiver();
     void stopReceiver();
@@ -173,4 +175,5 @@ private:
     QCheckBox *m_recordCamera = nullptr;
     QCheckBox *m_recordMicrophone = nullptr;
     int m_sceneFormat = 0;
+    QList<QThread *> m_previewThreads;
 };

@@ -28,6 +28,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGuiApplication>
+#include <QImage>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -53,10 +54,14 @@
 #include <QTextDocument>
 #include <QTextEdit>
 #include <QTimer>
+#include <QThread>
 #include <QUrl>
 #include <QVBoxLayout>
 
 #include <functional>
+#include <utility>
+#include <gst/app/gstappsink.h>
+#include <gst/video/video.h>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -96,6 +101,45 @@ QString formatDuration(qint64 seconds) {
     return QStringLiteral("%1:%2")
         .arg(minutes, 2, 10, QLatin1Char('0'))
         .arg(remaining, 2, 10, QLatin1Char('0'));
+}
+
+QImage loadVideoPreview(const QString &path) {
+    if (path.isEmpty() || !QFileInfo::exists(path)) return {};
+    QString escaped = QDir::toNativeSeparators(path);
+    escaped.replace('\\', QStringLiteral("\\\\"));
+    escaped.replace('"', QStringLiteral("\\\""));
+    const QString description = QStringLiteral(
+        "filesrc location=\"%1\" ! decodebin ! videoconvert ! videoscale ! "
+        "video/x-raw,format=BGRA,width=960 ! appsink name=preview sync=false max-buffers=1 drop=true")
+        .arg(escaped);
+    GError *error = nullptr;
+    GstElement *pipeline = gst_parse_launch(description.toUtf8().constData(), &error);
+    if (!pipeline || error) {
+        if (error) g_error_free(error);
+        if (pipeline) gst_object_unref(pipeline);
+        return {};
+    }
+    GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "preview");
+    gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    GstSample *sample = sink ? gst_app_sink_try_pull_sample(GST_APP_SINK(sink), 5 * GST_SECOND) : nullptr;
+    QImage image;
+    if (sample) {
+        GstVideoInfo info;
+        GstMapInfo map;
+        GstCaps *caps = gst_sample_get_caps(sample);
+        GstBuffer *buffer = gst_sample_get_buffer(sample);
+        if (caps && buffer && gst_video_info_from_caps(&info, caps) &&
+            gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+            image = QImage(map.data, GST_VIDEO_INFO_WIDTH(&info), GST_VIDEO_INFO_HEIGHT(&info),
+                           GST_VIDEO_INFO_PLANE_STRIDE(&info, 0), QImage::Format_ARGB32).copy();
+            gst_buffer_unmap(buffer, &map);
+        }
+        gst_sample_unref(sample);
+    }
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    if (sink) gst_object_unref(sink);
+    gst_object_unref(pipeline);
+    return image;
 }
 }
 
@@ -137,6 +181,8 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart, const QString &projectRo
                                    state == RecordingState::Failed ? QStringLiteral("Recording needs attention") :
                                    QStringLiteral("Ready to record"));
         refreshProjectList();
+        if (state == RecordingState::Idle && m_currentProject)
+            loadRecordedPreviews(*m_currentProject);
     });
     connect(m_recordingSession, &RecordingSession::warningRaised, this,
             [this](const QString &message) { appendActivity(QStringLiteral("Recording"), message); });
@@ -156,6 +202,15 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart, const QString &projectRo
             this, &MainWindow::handleStateChanged);
     connect(m_engine, &ReceiverEngine::eventReceived,
             this, &MainWindow::handleReceiverEvent);
+    connect(m_engine, &ReceiverEngine::previewFrame, this, [this](const QImage &frame) {
+        if (!m_sceneCanvas || !m_sceneDocument) return;
+        for (const SceneSource &source : m_sceneDocument->sources()) {
+            if (source.type == SceneSourceType::AirPlay) {
+                m_sceneCanvas->setSourcePreview(source.id, frame);
+                break;
+            }
+        }
+    });
     connect(m_engine, &ReceiverEngine::recoveryScheduled, this, [this](int delayMs) {
         appendActivity(QStringLiteral("Recovery"),
                        QStringLiteral("Receiver will retry in %1 second(s).")
@@ -180,6 +235,9 @@ MainWindow::~MainWindow() {
         m_cursorOverride = false;
     }
     stopBluetoothBeacon();
+    for (QThread *thread : std::as_const(m_previewThreads)) {
+        if (thread && thread->isRunning()) thread->wait();
+    }
     delete m_recordingSession;
     m_recordingSession = nullptr;
     delete m_exportJob;
@@ -498,6 +556,37 @@ void MainWindow::saveCurrentProject() {
     }
 }
 
+void MainWindow::loadRecordedPreviews(const ProjectInfo &project) {
+    const QStringList airplay = QDir(project.airplayDirectory()).entryList(
+        {QStringLiteral("video-*.mkv")}, QDir::Files, QDir::Name);
+    const QStringList cameras = QDir(project.presenterDirectory()).entryList(
+        {QStringLiteral("camera-*.mkv")}, QDir::Files, QDir::Name);
+    const QString airplayPath = airplay.isEmpty() ? QString() :
+        QDir(project.airplayDirectory()).filePath(airplay.first());
+    const QString cameraPath = cameras.isEmpty() ? QString() :
+        QDir(project.presenterDirectory()).filePath(cameras.first());
+    if (airplayPath.isEmpty() && cameraPath.isEmpty()) return;
+    const QString projectId = project.id;
+    QThread *thread = QThread::create([this, projectId, airplayPath, cameraPath]() {
+        const QImage airplayFrame = loadVideoPreview(airplayPath);
+        const QImage cameraFrame = loadVideoPreview(cameraPath);
+        QMetaObject::invokeMethod(this, [this, projectId, airplayFrame, cameraFrame]() {
+            if (!m_currentProject || m_currentProject->id != projectId || !m_sceneCanvas || !m_sceneDocument)
+                return;
+            for (const SceneSource &source : m_sceneDocument->sources()) {
+                if (source.type == SceneSourceType::AirPlay && !airplayFrame.isNull())
+                    m_sceneCanvas->setSourcePreview(source.id, airplayFrame);
+                if (source.type == SceneSourceType::Camera && !cameraFrame.isNull())
+                    m_sceneCanvas->setSourcePreview(source.id, cameraFrame);
+            }
+        }, Qt::QueuedConnection);
+    });
+    m_previewThreads.append(thread);
+    connect(thread, &QThread::finished, this, [this, thread]() { m_previewThreads.removeAll(thread); });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
 
 QWidget *MainWindow::createPlayerPage() {
     m_playerPage = new QWidget(this);
@@ -773,6 +862,7 @@ QWidget *MainWindow::createProjectsPage() {
         m_currentProject = std::make_unique<ProjectInfo>(loaded.project);
         m_sceneCanvas->setDocument(m_sceneDocument.get(), static_cast<SceneFormat>(m_sceneFormat));
         refreshLayerList();
+        loadRecordedPreviews(*m_currentProject);
         selectPage(0);
         setStudioMode(true);
     });

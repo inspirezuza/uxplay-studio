@@ -27,11 +27,17 @@ typedef struct uxplay_event {
 } uxplay_event;
 
 typedef void (*uxplay_event_callback)(const uxplay_event *event, void *context);
+typedef void (*uxplay_preview_callback)(const unsigned char *data, int width, int height,
+                                        int stride, void *context);
 
 int start_uxplay(int argc, char *argv[]);
 void stop_uxplay();
 void uxplay_set_video_window(uintptr_t window_handle);
 void uxplay_set_event_callback(uxplay_event_callback callback, void *context);
+void uxplay_set_preview_callback(uxplay_preview_callback callback, void *context);
+int uxplay_start_recording(const char *directory);
+void uxplay_stop_recording();
+void uxplay_set_recording_test_mode(int enabled);
 
 #ifdef __cplusplus
 }

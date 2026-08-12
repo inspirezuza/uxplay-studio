@@ -1,4 +1,5 @@
 #include "recordingsession.h"
+#include "uxplay_api.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -24,6 +25,7 @@ RecordingSession::~RecordingSession() {
         m_state == RecordingState::Finalizing) {
         QString ignored;
         m_runner->stopAll(700, &ignored);
+        uxplay_stop_recording();
         m_store->setState(m_project.directory, ProjectState::Recoverable);
     }
 }
@@ -35,7 +37,6 @@ bool RecordingSession::start(const ProjectInfo &project, const RecordingOptions 
         return false;
     }
     m_project = project;
-    m_captureMonitorHandle = options.monitorHandle;
     m_lastError.clear();
     m_warnings.clear();
     transition(RecordingState::Starting);
@@ -45,10 +46,10 @@ bool RecordingSession::start(const ProjectInfo &project, const RecordingOptions 
         return false;
     }
 
-    QString error;
     QStringList tracks;
-    if (!m_runner->startTrack(QStringLiteral("airplay-video"), videoPipeline(options), &error)) {
-        m_lastError = error.isEmpty() ? QStringLiteral("Could not start the AirPlay video track") : error;
+    const QByteArray airplayDirectory = QDir::toNativeSeparators(m_project.airplayDirectory()).toUtf8();
+    if (!uxplay_start_recording(airplayDirectory.constData())) {
+        m_lastError = QStringLiteral("Could not start the direct AirPlay video track");
         m_store->setState(project.directory, ProjectState::Failed);
         transition(RecordingState::Failed);
         transition(RecordingState::Idle);
@@ -74,6 +75,7 @@ bool RecordingSession::start(const ProjectInfo &project, const RecordingOptions 
         m_lastError = QStringLiteral("Could not safely write session metadata");
         QString ignored;
         m_runner->stopAll(1000, &ignored);
+        uxplay_stop_recording();
         m_store->setState(project.directory, ProjectState::Recoverable);
         transition(RecordingState::Idle);
         return false;
@@ -88,6 +90,7 @@ bool RecordingSession::stop() {
     m_store->setState(m_project.directory, ProjectState::Finalizing);
     QString error;
     const bool clean = m_runner->stopAll(5000, &error);
+    uxplay_stop_recording();
     m_lastError = error;
     m_store->setState(m_project.directory, clean ? ProjectState::Ready : ProjectState::Recoverable);
     transition(clean ? RecordingState::Idle : RecordingState::Failed);
@@ -95,21 +98,9 @@ bool RecordingSession::stop() {
 }
 
 bool RecordingSession::updateCaptureRect(quint64 monitorHandle, const QRect &captureRect) {
-    if (m_state != RecordingState::Recording || !captureRect.isValid()) return false;
-    if (monitorHandle != m_captureMonitorHandle) {
-        const QString warning = QStringLiteral("Keep the Studio window on the same monitor while recording");
-        if (!m_warnings.contains(warning)) {
-            m_warnings.append(warning);
-            emit warningRaised(warning);
-        }
-        return false;
-    }
-    QString error;
-    if (!m_runner->updateVideoCapture(captureRect, &error) && !error.isEmpty()) {
-        emit warningRaised(error);
-        return false;
-    }
-    return true;
+    Q_UNUSED(monitorHandle)
+    Q_UNUSED(captureRect)
+    return m_state == RecordingState::Recording;
 }
 
 RecordingState RecordingSession::state() const { return m_state; }
@@ -138,22 +129,6 @@ bool RecordingSession::writeSessionManifest(const RecordingOptions &options,
     QSaveFile file(QDir(m_project.directory).filePath(QStringLiteral("session.json")));
     return file.open(QIODevice::WriteOnly) &&
            file.write(QJsonDocument(root).toJson(QJsonDocument::Indented)) >= 0 && file.commit();
-}
-
-QString RecordingSession::videoPipeline(const RecordingOptions &options) const {
-    const QRect r = options.captureRect;
-    const QString location = QDir(m_project.airplayDirectory()).filePath(QStringLiteral("video-%05d.mkv"));
-    QString pipeline = QStringLiteral("d3d11screencapturesrc name=studio-capture do-timestamp=true show-cursor=false ");
-    if (options.monitorHandle) pipeline += QStringLiteral("monitor-handle=%1 ").arg(options.monitorHandle);
-    pipeline += QStringLiteral("crop-x=%1 crop-y=%2 crop-width=%3 crop-height=%4 ")
-        .arg(r.x()).arg(r.y()).arg(r.width()).arg(r.height());
-    pipeline += QStringLiteral(
-        "! queue leaky=downstream max-size-buffers=3 ! d3d11convert ! videoscale "
-        "! video/x-raw(memory:D3D11Memory),format=NV12,width=%2,height=%3,framerate=%1/1 ! mfh264enc bitrate=12000 low-latency=true rc-mode=cbr quality-vs-speed=15 "
-        "! h264parse ! splitmuxsink muxer-factory=matroskamux max-size-time=30000000000 location=")
-        .arg(options.frameRate).arg(r.width() & ~1).arg(r.height() & ~1);
-    pipeline += quoted(location) + QStringLiteral(" async-finalize=true");
-    return pipeline;
 }
 
 QString RecordingSession::audioPipeline(bool loopback) const {
