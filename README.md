@@ -22,7 +22,7 @@ UxPlay Studio keeps the receiver, live video, connection status, settings, activ
 - Local activity log and copyable diagnostics
 - Bonjour and Bluetooth discovery support
 - Automatic recovery with capped backoff
-- Direct3D11 hardware decode, conversion, and display without a CPU frame copy
+- Hardware decode is preferred when available, with automatic software fallback
 - Bounded low-latency buffering that drops stale frames instead of falling farther behind
 - Portable x64 and ARM64 build pipeline
 
@@ -68,9 +68,10 @@ Qt MainWindow
   ├─ Activity, Settings, Diagnostics
   └─ ReceiverEngine state machine
        └─ vendored libuxplay
-            └─ GStreamer D3D11 zero-copy pipeline
-                 ├─ d3d11h264dec → 2-frame leaky queue
-                 └─ d3d11convert → d3d11videosink
+            └─ GStreamer embedded D3D11 pipeline
+                 ├─ decodebin prefers available hardware decode and can fall back to software
+                 ├─ 2-frame leaky queue in low-latency modes
+                 └─ d3d11upload → d3d11convert → d3d11videosink
                       └─ GstVideoOverlay → VideoSurface HWND
 ```
 

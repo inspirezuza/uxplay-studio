@@ -52,7 +52,7 @@ typedef struct video_renderer_s video_renderer_t;
  * of zero restores the normal standalone-window behavior. */
 void video_renderer_set_window_handle(uintptr_t window_handle);
 
-void video_renderer_init (logger_t *logger, const char *server_name, videoflip_t videoflip[2], const char *parser, const char *rtp_pipeline,
+bool video_renderer_init (logger_t *logger, const char *server_name, videoflip_t videoflip[2], const char *parser, const char *rtp_pipeline,
                           const char *decoder, const char *converter, const char *videosink, const char *videosink_options,
                           bool initial_fullscreen, bool video_sync, bool h265_support, bool coverart_support,
                           guint playbin_version,  const char *uri);

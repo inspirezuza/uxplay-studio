@@ -68,7 +68,8 @@ QString NetworkDiagnostics::report(const ReceiverConfig &config, quintptr videoW
     stream << "Receiver\n";
     stream << "  Name: " << config.receiverName << "\n";
     stream << "  Quality: " << config.qualityLabel() << "\n";
-    stream << "  Renderer: Direct3D11 DXVA zero-copy (embedded)\n";
+    stream << "  Renderer: d3d11videosink (embedded)\n";
+    stream << "  Decoder: Automatic; hardware preferred with software fallback\n";
     stream << "  Frame backlog: "
            << (config.usesLowLatencyPipeline() ? "Bounded to 2 decoded frames; stale frames drop"
                                                : "Timestamp-synchronized")

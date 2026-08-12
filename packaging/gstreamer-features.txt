@@ -27,6 +27,8 @@ videoconvert
 videoscale
 autovideosink
 d3d11videosink
+d3d11upload
+d3d11convert
 d3d12videosink
 
 # Cover art, metadata, rotation and recording

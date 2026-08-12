@@ -2167,10 +2167,15 @@ extern "C" void video_reset(void *cls, reset_type_t type) {
             video_renderer_stop();
            /* reset the video renderer immediately to avoid a timing issue if we wait for main_loop to reset */ 
             video_renderer_destroy();
-            video_renderer_init(render_logger, server_name.c_str(), videoflip, video_parser.c_str(), rtp_pipeline.c_str(),
-                                video_decoder.c_str(), video_converter.c_str(), videosink.c_str(),
-                                videosink_options.c_str(), fullscreen, video_sync, h265_support,
-                                render_coverart, playbin_version, NULL);
+            if (!video_renderer_init(render_logger, server_name.c_str(), videoflip, video_parser.c_str(), rtp_pipeline.c_str(),
+                                     video_decoder.c_str(), video_converter.c_str(), videosink.c_str(),
+                                     videosink_options.c_str(), fullscreen, video_sync, h265_support,
+                                     render_coverart, playbin_version, NULL)) {
+                emit_host_event(UXPLAY_EVENT_ERROR, NULL, NULL, NULL,
+                                "The embedded video renderer could not be initialized");
+                stop_uxplay();
+                return;
+            }
             video_renderer_start();
             close_window = false;  // we already closed the window
         }
@@ -3192,10 +3197,23 @@ int start_uxplay (int argc, char *argv[]) {
         LOGI("audio_disabled");
     }
     if (use_video) {
-        video_renderer_init(render_logger, server_name.c_str(), videoflip, video_parser.c_str(), rtp_pipeline.c_str(),
-                            video_decoder.c_str(), video_converter.c_str(), videosink.c_str(),
-                            videosink_options.c_str(), fullscreen, video_sync, h265_support,
-                            render_coverart, playbin_version, NULL);
+        if (!video_renderer_init(render_logger, server_name.c_str(), videoflip, video_parser.c_str(), rtp_pipeline.c_str(),
+                                 video_decoder.c_str(), video_converter.c_str(), videosink.c_str(),
+                                 videosink_options.c_str(), fullscreen, video_sync, h265_support,
+                                 render_coverart, playbin_version, NULL)) {
+            emit_host_event(UXPLAY_EVENT_ERROR, NULL, NULL, NULL,
+                            "The embedded video renderer could not be initialized");
+            if (use_audio) {
+                audio_renderer_destroy();
+            }
+            logger_destroy(render_logger);
+            render_logger = NULL;
+#ifdef GST_MACOS
+            return;
+#else
+            return 2;
+#endif
+        }
         video_renderer_start();
 #ifdef __OpenBSD__
     } else {
@@ -3306,10 +3324,21 @@ int start_uxplay (int argc, char *argv[]) {
                 raop_remove_known_connections(raop);
             }
             const char *uri = (url.empty() ? NULL : url.c_str());
-            video_renderer_init(render_logger, server_name.c_str(), videoflip, video_parser.c_str(),rtp_pipeline.c_str(),
-                                video_decoder.c_str(), video_converter.c_str(), videosink.c_str(),
-                                videosink_options.c_str(), fullscreen, video_sync, h265_support,
-                                render_coverart, playbin_version, uri);
+            if (!video_renderer_init(render_logger, server_name.c_str(), videoflip, video_parser.c_str(),rtp_pipeline.c_str(),
+                                     video_decoder.c_str(), video_converter.c_str(), videosink.c_str(),
+                                     videosink_options.c_str(), fullscreen, video_sync, h265_support,
+                                     render_coverart, playbin_version, uri)) {
+                emit_host_event(UXPLAY_EVENT_ERROR, NULL, NULL, NULL,
+                                "The embedded video renderer could not be reinitialized");
+                stop_raop_server();
+                stop_dnssd();
+                cleanup();
+#ifdef GST_MACOS
+                return;
+#else
+                return 2;
+#endif
+            }
             full_video_reset = false;
             video_renderer_start();
         }

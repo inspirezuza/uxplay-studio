@@ -9,6 +9,7 @@
 #include <QTextStream>
 
 #include <gst/gst.h>
+#include <gst/video/videooverlay.h>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -69,6 +70,15 @@ static int runRuntimeSelfTest(const QString &appPath) {
                 gst_object_unref(feature);
             }
         }
+    }
+
+    GstElement *embeddedSink = gst_element_factory_make("d3d11videosink", nullptr);
+    if (!embeddedSink || !GST_IS_VIDEO_OVERLAY(embeddedSink)) {
+        fprintf(stderr, "SELF-TEST ERROR: d3d11videosink cannot embed in the app window\n");
+        passed = false;
+    }
+    if (embeddedSink) {
+        gst_object_unref(embeddedSink);
     }
 
     if (passed) {

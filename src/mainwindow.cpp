@@ -243,7 +243,7 @@ QWidget *MainWindow::createPlayerPage() {
     title->setObjectName(QStringLiteral("cardTitle"));
     titleRow->addWidget(title);
     titleRow->addStretch();
-    auto *embedded = new QLabel(QStringLiteral("D3D11 · ZERO COPY"), m_playerChrome);
+    auto *embedded = new QLabel(QStringLiteral("D3D11 · EMBEDDED"), m_playerChrome);
     embedded->setObjectName(QStringLiteral("miniBadge"));
     titleRow->addWidget(embedded);
     m_playerLayout->addWidget(m_playerChrome);

@@ -21,7 +21,7 @@ QStringList ReceiverConfig::uxplayArguments(const QString &bleStatusPath) const 
     QStringList args {
         QStringLiteral("-n"), receiverName.trimmed(),
         QStringLiteral("-nh"),
-        QStringLiteral("-vd"), QStringLiteral("d3d11h264dec"),
+        QStringLiteral("-vd"), QStringLiteral("decodebin"),
         QStringLiteral("-vc"), QStringLiteral("d3d11convert"),
         QStringLiteral("-vs"), QStringLiteral("d3d11videosink"),
         QStringLiteral("-nofreeze")

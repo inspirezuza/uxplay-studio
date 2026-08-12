@@ -216,7 +216,10 @@ GstElement *make_video_sink(const char *videosink, const char *videosink_options
     /* process the video_sink_options */
     size_t len = strlen(videosink_options);
     if (!len) {
-        attach_embedded_window(video_sink);
+        if (!attach_embedded_window(video_sink)) {
+            gst_object_unref(video_sink);
+            return NULL;
+        }
         return video_sink;
     }
 
@@ -246,11 +249,14 @@ GstElement *make_video_sink(const char *videosink, const char *videosink_options
         }
     }
     free(options);
-    attach_embedded_window(video_sink);
+    if (!attach_embedded_window(video_sink)) {
+        gst_object_unref(video_sink);
+        return NULL;
+    }
     return video_sink;
 }
 
-void video_renderer_init(logger_t *render_logger, const char *server_name, videoflip_t videoflip[2], const char *parser, const char * rtp_pipeline,
+bool video_renderer_init(logger_t *render_logger, const char *server_name, videoflip_t videoflip[2], const char *parser, const char * rtp_pipeline,
                           const char *decoder, const char *converter, const char *videosink, const char *videosink_options, 
                           bool initial_fullscreen, bool video_sync, bool h265_support, bool coverart_support, guint playbin_version, const char *uri) {
     GError *error = NULL;
@@ -261,18 +267,33 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
     auto_videosink = (strstr(videosink, "autovideosink") || strstr(videosink, "fpsdisplaysink"));
     logger = render_logger;
 
+    if (embedded_window_handle && auto_videosink) {
+        logger_log(logger, LOGGER_ERR,
+                   "Automatic video sinks are not allowed in embedded mode; refusing detached playback");
+        return false;
+    }
+
     const bool d3d11_requested = g_str_has_prefix(videosink, "d3d11videosink")
-        && g_str_has_prefix(decoder, "d3d11")
         && g_str_has_prefix(converter, "d3d11");
-    const bool d3d11_available = d3d11_requested
-        && element_factory_available(decoder)
-        && element_factory_available(converter)
-        && element_factory_available(videosink);
-    const char *effective_decoder = d3d11_available ? decoder : (d3d11_requested ? "decodebin" : decoder);
-    const char *effective_converter = d3d11_available ? converter : (d3d11_requested ? "videoconvert" : converter);
-    if (d3d11_requested && !d3d11_available) {
+    const bool d3d11_sink_available = d3d11_requested && element_factory_available(videosink);
+    const bool d3d11_converter_available = d3d11_requested && element_factory_available(converter);
+    const char *effective_decoder = decoder;
+    const char *effective_converter = d3d11_converter_available
+        ? converter : (d3d11_requested ? "videoconvert" : converter);
+    if (embedded_window_handle && !element_factory_available(videosink)) {
+        logger_log(logger, LOGGER_ERR,
+                   "Embedded video sink '%s' is unavailable; refusing detached playback",
+                   videosink);
+        return false;
+    }
+    if (d3d11_requested && !d3d11_converter_available) {
         logger_log(logger, LOGGER_WARNING,
-                   "D3D11 zero-copy elements are unavailable; falling back to automatic decoding");
+                   "D3D11 conversion is unavailable; using the embedded sink with software conversion");
+    }
+    if (d3d11_requested && !d3d11_sink_available) {
+        logger_log(logger, LOGGER_ERR,
+                   "D3D11 embedded sink is unavailable; refusing detached playback");
+        return false;
     }
 
     logger_debug = (logger_get_level(logger) >= LOGGER_DEBUG);
@@ -346,6 +367,8 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                 GstElement *playbin_videosink = make_video_sink(videosink, videosink_options);  
                 if (!playbin_videosink) {
                     logger_log(logger, LOGGER_ERR, "video_renderer_init: failed to create playbin_videosink");
+                    video_renderer_destroy();
+                    return false;
                 } else {
                     logger_log(logger, LOGGER_DEBUG, "video_renderer_init: create playbin_videosink at %p", playbin_videosink);
                     g_object_set(G_OBJECT (renderer_type[i]->pipeline), "video-sink", playbin_videosink, NULL);
@@ -373,13 +396,11 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                 g_assert(0);
             }
             const bool low_latency_pipeline = !video_sync && !rtp && !jpeg_pipeline;
-            const bool codec_d3d11_available = d3d11_available
-                && (i != type_265 || element_factory_available("d3d11h265dec"));
-            const bool d3d11_pipeline = codec_d3d11_available && !rtp && !jpeg_pipeline;
-            const char *pipeline_decoder = codec_d3d11_available
-                ? effective_decoder : (d3d11_requested ? "decodebin" : effective_decoder);
-            const char *pipeline_converter = (jpeg_pipeline || !codec_d3d11_available)
-                && d3d11_requested ? "videoconvert" : effective_converter;
+            const bool d3d11_pipeline = d3d11_sink_available
+                && d3d11_converter_available && !rtp && !jpeg_pipeline;
+            const char *pipeline_decoder = effective_decoder;
+            const char *pipeline_converter = (jpeg_pipeline && d3d11_requested)
+                ? "videoconvert" : effective_converter;
             GString *launch = low_latency_pipeline
                 ? g_string_new("appsrc name=video_source is-live=true block=false max-buffers=4 max-bytes=0 max-time=0 leaky-type=downstream ! ")
                 : g_string_new("appsrc name=video_source ! ");
@@ -405,6 +426,7 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                         "queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream ! ");
                 }
                 if (d3d11_pipeline) {
+                    g_string_append(launch, "d3d11upload ! ");
                     g_string_append(launch, effective_converter);
                     g_string_append_printf(launch, " video-direction=%s ! ",
                                            video_direction(&videoflip[0], &videoflip[1]));
@@ -455,8 +477,17 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                                "           or some requested part of GStreamer is not installed\n");
                 }
                 g_clear_error (&error);
+                if (renderer_type[i]->pipeline) {
+                    gst_object_unref(renderer_type[i]->pipeline);
+                    renderer_type[i]->pipeline = NULL;
+                }
             }
-            g_assert (renderer_type[i]->pipeline);
+            if (!renderer_type[i]->pipeline) {
+                g_string_free(launch, TRUE);
+                gst_caps_unref(caps);
+                video_renderer_destroy();
+                return false;
+            }
             if (embedded_window_handle && (!rtp || jpeg_pipeline)) {
                 GString *sink_name = g_string_new(videosink);
                 g_string_append(sink_name, "_");
@@ -465,7 +496,15 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                     GST_BIN(renderer_type[i]->pipeline), sink_name->str);
                 if (!attach_embedded_window(embedded_sink)) {
                     logger_log(logger, LOGGER_ERR,
-                               "Embedded rendering is required; refusing to create a separate video window");
+                                "Embedded rendering is required; refusing to create a separate video window");
+                    if (embedded_sink) {
+                        gst_object_unref(embedded_sink);
+                    }
+                    g_string_free(sink_name, TRUE);
+                    g_string_free(launch, TRUE);
+                    gst_caps_unref(caps);
+                    video_renderer_destroy();
+                    return false;
                 }
                 if (embedded_sink) {
                     gst_object_unref(embedded_sink);
@@ -475,7 +514,7 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
 
             if (d3d11_pipeline) {
                 logger_log(logger, LOGGER_INFO,
-                           "Using Direct3D11 zero-copy video decoding and conversion%s",
+                           "Using Direct3D11-preferred automatic decoding and GPU conversion%s",
                            low_latency_pipeline ? " with bounded low-latency buffering" : "");
             }
             GstClock *clock = gst_system_clock_obtain();
@@ -536,9 +575,11 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                        "\nor your choices of video options (-vs -vd -vc -fs etc.) are incompatible on"
                        "\nthis computer architecture.  (An example: kmssink with fullscreen option -fs"
                        "\nmay work on some systems, but fail on others)");
-            exit(1);
+            video_renderer_destroy();
+            return false;
         }
     }
+    return true;
 }
 
 void video_renderer_pause() {
@@ -779,11 +820,16 @@ static void video_renderer_destroy_instance(video_renderer_t *renderer) {
         logger_log(logger, LOGGER_DEBUG,"destroying renderer instance %p codec=%s ", renderer, renderer->codec);
         GstState state;
         GstStateChangeReturn ret;
-        gst_element_get_state(renderer->pipeline, &state, NULL, 100 * GST_MSECOND);
-        logger_log(logger, LOGGER_DEBUG,"pipeline state is %s", gst_element_state_get_name(state));
-        if (state != GST_STATE_NULL) {
+        state = GST_STATE_NULL;
+        if (renderer->pipeline) {
+            gst_element_get_state(renderer->pipeline, &state, NULL, 100 * GST_MSECOND);
+            logger_log(logger, LOGGER_DEBUG,"pipeline state is %s", gst_element_state_get_name(state));
+        }
+        if (renderer->pipeline && state != GST_STATE_NULL) {
             if (!hls_video) {
-                gst_app_src_end_of_stream (GST_APP_SRC(renderer->appsrc));
+                if (renderer->appsrc) {
+                    gst_app_src_end_of_stream (GST_APP_SRC(renderer->appsrc));
+                }
             }
             ret = gst_element_set_state (renderer->pipeline, GST_STATE_NULL);
             logger_log(logger, LOGGER_DEBUG,"pipeline_state_change_return: %s",
@@ -799,8 +845,14 @@ static void video_renderer_destroy_instance(video_renderer_t *renderer) {
             gst_object_unref (renderer->textsrc);
             renderer->textsrc = NULL;
         }	
-        gst_object_unref(renderer->bus);
-        gst_object_unref(renderer->pipeline);
+        if (renderer->bus) {
+            gst_object_unref(renderer->bus);
+            renderer->bus = NULL;
+        }
+        if (renderer->pipeline) {
+            gst_object_unref(renderer->pipeline);
+            renderer->pipeline = NULL;
+        }
 #ifdef X_DISPLAY_FIX
         if (renderer->gst_window){
 	  // free_X11_Display(renderer->gst_window);   without this, a memory leak; with it, a coredump
@@ -821,8 +873,10 @@ void video_renderer_destroy() {
     for (int i = 0; i < n_renderers; i++) {
         if (renderer_type[i]) {
             video_renderer_destroy_instance(renderer_type[i]);
+            renderer_type[i] = NULL;
         }
     }
+    renderer = NULL;
 }
 
 static void get_stream_status_name(GstStreamStatusType type, char *name, size_t len) {

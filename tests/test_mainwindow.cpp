@@ -2,6 +2,8 @@
 
 #include <QApplication>
 #include <QHBoxLayout>
+#include <QLabel>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -24,6 +26,8 @@ private slots:
         auto *card = window.findChild<QWidget *>(QStringLiteral("playerCard"));
         auto *pageLayout = window.findChild<QHBoxLayout *>(QStringLiteral("playerPageLayout"));
         auto *playerLayout = window.findChild<QVBoxLayout *>(QStringLiteral("playerLayout"));
+        auto *rendererBadge = window.findChild<QLabel *>(QStringLiteral("miniBadge"));
+        auto *diagnostics = window.findChild<QPlainTextEdit *>(QStringLiteral("diagnosticsText"));
 
         QVERIFY(button);
         QVERIFY(sidebar);
@@ -33,6 +37,13 @@ private slots:
         QVERIFY(card);
         QVERIFY(pageLayout);
         QVERIFY(playerLayout);
+        QVERIFY(rendererBadge);
+        QVERIFY(diagnostics);
+        QCOMPARE(rendererBadge->text(), QStringLiteral("D3D11 · EMBEDDED"));
+        QVERIFY(diagnostics->toPlainText().contains(
+            QStringLiteral("Decoder: Automatic; hardware preferred with software fallback")));
+        QVERIFY(!diagnostics->toPlainText().contains(QStringLiteral("zero-copy"),
+                                                      Qt::CaseInsensitive));
 
         QTest::mouseClick(button, Qt::LeftButton);
         QTRY_VERIFY(window.isFullScreen());

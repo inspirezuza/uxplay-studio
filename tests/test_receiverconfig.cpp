@@ -13,7 +13,7 @@ private slots:
         QVERIFY(sink >= 0);
         QCOMPARE(args.value(sink + 1), QStringLiteral("d3d11videosink"));
         QCOMPARE(args.value(args.indexOf(QStringLiteral("-vd")) + 1),
-                 QStringLiteral("d3d11h264dec"));
+                 QStringLiteral("decodebin"));
         QCOMPARE(args.value(args.indexOf(QStringLiteral("-vc")) + 1),
                  QStringLiteral("d3d11convert"));
         QVERIFY(!args.contains(QStringLiteral("-fs")));
