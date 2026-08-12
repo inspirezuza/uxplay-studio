@@ -171,12 +171,12 @@ if (-not $ValidateOnly -and $ManifestPath) {
     $files = Get-ChildItem -LiteralPath $stage -Recurse -File |
         Sort-Object FullName |
         ForEach-Object {
+            $relativePath = Get-RelativePath -BasePath $stage -Path $_.FullName
+            $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
             [ordered]@{
-                path = (Get-RelativePath -BasePath $stage -Path $_.FullName).
-                    Replace("\", "/")
+                path = $relativePath.Replace("\", "/")
                 bytes = $_.Length
-                sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.
-                    ToLowerInvariant()
+                sha256 = $hash.Hash.ToLowerInvariant()
             }
         }
 
