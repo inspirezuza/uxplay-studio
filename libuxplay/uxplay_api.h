@@ -36,8 +36,9 @@ void uxplay_set_video_window(uintptr_t window_handle);
 void uxplay_set_event_callback(uxplay_event_callback callback, void *context);
 void uxplay_set_preview_callback(uxplay_preview_callback callback, void *context);
 int uxplay_start_recording(const char *directory);
-void uxplay_stop_recording();
+int uxplay_stop_recording();
 void uxplay_set_recording_test_mode(int enabled);
+void uxplay_set_recording_test_stop_result(int clean);
 
 #ifdef __cplusplus
 }

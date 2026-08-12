@@ -11,14 +11,17 @@
 #include <gst/pbutils/pbutils.h>
 #include <QUrl>
 #include <gst/video/video.h>
+#include <functional>
 
 namespace {
-qint64 discoverTimelineDuration(const ProjectInfo &project) {
+qint64 discoverTimelineDuration(const ProjectInfo &project, const std::function<bool()> &cancelled) {
     qint64 durationNanoseconds = 0;
     QHash<QString, qint64> trackDurations;
     for (const QString &directory : {project.airplayDirectory(), project.presenterDirectory()}) {
+        if (cancelled()) return 0;
         QDirIterator files(directory, {QStringLiteral("*.mkv"), QStringLiteral("*.mka")}, QDir::Files);
         while (files.hasNext()) {
+            if (cancelled()) return 0;
             const QString path = files.next();
             GstDiscoverer *discoverer = gst_discoverer_new(3 * GST_SECOND, nullptr);
             if (!discoverer) continue;
@@ -34,6 +37,7 @@ qint64 discoverTimelineDuration(const ProjectInfo &project) {
             }
             if (error) g_error_free(error);
             gst_object_unref(discoverer);
+            if (cancelled()) return 0;
         }
     }
     for (qint64 duration : trackDurations) durationNanoseconds = qMax(durationNanoseconds, duration);
@@ -124,12 +128,21 @@ bool ExportJob::start(const ProjectInfo &project, const SceneDocument &scene,
             emit failed(sceneResult.error);
             return;
         }
-        const qint64 durationNanoseconds = discoverTimelineDuration(project);
+        const auto cancelled = []() { return QThread::currentThread()->isInterruptionRequested(); };
+        const qint64 durationNanoseconds = discoverTimelineDuration(project, cancelled);
+        if (cancelled()) {
+            m_store->setState(project.directory, ProjectState::Ready);
+            return;
+        }
         const auto built = ExportPipeline::build(project, *sceneResult.document, format,
                                                   outputPath, durationNanoseconds);
         if (!built.ok()) {
             m_store->setState(project.directory, ProjectState::Failed);
             emit failed(built.error);
+            return;
+        }
+        if (cancelled()) {
+            m_store->setState(project.directory, ProjectState::Ready);
             return;
         }
         const QString pipelineDescription = built.description;
@@ -146,6 +159,12 @@ bool ExportJob::start(const ProjectInfo &project, const SceneDocument &scene,
         }
         GstBus *bus = gst_element_get_bus(pipeline);
         attachMasks(pipeline);
+        if (cancelled()) {
+            gst_object_unref(bus);
+            gst_object_unref(pipeline);
+            m_store->setState(project.directory, ProjectState::Ready);
+            return;
+        }
         gst_element_set_state(pipeline, GST_STATE_PLAYING);
         GstMessage *message = nullptr;
         while (!QThread::currentThread()->isInterruptionRequested() && !message) {

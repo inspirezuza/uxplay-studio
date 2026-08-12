@@ -2,6 +2,7 @@
 
 #include <QFileInfo>
 #include <QSignalSpy>
+#include <QElapsedTimer>
 #include <QTemporaryDir>
 #include <QtTest>
 #include <gst/gst.h>
@@ -72,6 +73,33 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(finished.count() == 1 || failed.count() == 1, 35000);
         QVERIFY2(failed.isEmpty(), failed.isEmpty() ? "" : qPrintable(failed.first().first().toString()));
         QVERIFY(QFileInfo(output).size() > 1024);
+    }
+
+    void destructionCancelsDiscoveryBeforeStartingAnExport() {
+        QTemporaryDir temp;
+        ProjectStore store(temp.path());
+        SceneDocument scene;
+        scene.addSource(SceneSourceType::AirPlay, QStringLiteral("iPad"));
+        const auto created = store.create(scene);
+        QVERIFY(created.ok());
+        for (int index = 0; index < 100; ++index) {
+            QFile corrupt(QDir(created.project.airplayDirectory())
+                              .filePath(QStringLiteral("video-%1.mkv").arg(index, 5, 10, QLatin1Char('0'))));
+            QVERIFY(corrupt.open(QIODevice::WriteOnly));
+            corrupt.write("not-media");
+        }
+
+        const QString output = QDir(created.project.exportsDirectory()).filePath(QStringLiteral("cancelled.mp4"));
+        QElapsedTimer elapsed;
+        elapsed.start();
+        {
+            ExportJob job(&store);
+            QVERIFY(job.start(created.project, scene, SceneFormat::Wide, output));
+            QTest::qWait(20);
+        }
+        QVERIFY2(elapsed.elapsed() < 5000, "Export cancellation scanned every segment");
+        QVERIFY(!QFileInfo::exists(output));
+        QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Ready);
     }
 };
 

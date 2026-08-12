@@ -89,8 +89,13 @@ bool RecordingSession::stop() {
     transition(RecordingState::Finalizing);
     m_store->setState(m_project.directory, ProjectState::Finalizing);
     QString error;
-    const bool clean = m_runner->stopAll(5000, &error);
-    uxplay_stop_recording();
+    const bool optionalTracksClean = m_runner->stopAll(5000, &error);
+    const bool airplayTrackClean = uxplay_stop_recording() != 0;
+    const bool clean = optionalTracksClean && airplayTrackClean;
+    if (!airplayTrackClean) {
+        const QString airplayError = QStringLiteral("The AirPlay video track could not be finalized safely");
+        error = error.isEmpty() ? airplayError : error + QStringLiteral("; ") + airplayError;
+    }
     m_lastError = error;
     m_store->setState(m_project.directory, clean ? ProjectState::Ready : ProjectState::Recoverable);
     transition(clean ? RecordingState::Idle : RecordingState::Failed);

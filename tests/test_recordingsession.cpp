@@ -10,6 +10,10 @@
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 
+namespace {
+void discardLog(void *, int, const char *) {}
+}
+
 class FakePipelineRunner final : public PipelineRunner {
 public:
     bool startTrack(const QString &name, const QString &pipeline, QString *error) override {
@@ -80,11 +84,28 @@ private slots:
         QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Ready);
     }
 
-    void directAirplayMuxProducesARecoverableVideoTrack() {
+    void directAirplayMuxRejectsEmptyFinalization() {
         QTemporaryDir temp;
-        const QByteArray prefix = QDir(temp.path()).filePath(QStringLiteral("video")).toUtf8();
+        QVERIFY(QDir(temp.path()).mkdir(QStringLiteral("space in path")));
+        const QByteArray prefix = QDir(temp.path()).filePath(QStringLiteral("space in path/video")).toUtf8();
         logger_t *logger = logger_init();
         QVERIFY(logger);
+        logger_set_callback(logger, discardLog, nullptr);
+        mux_renderer_init(logger, prefix.constData(), false, true);
+        QVERIFY(mux_renderer_choose_video_codec(false));
+        QVERIFY(!mux_renderer_stop());
+        mux_renderer_destroy();
+        logger_destroy(logger);
+    }
+
+    void directAirplayMuxProducesARecoverableVideoTrack() {
+        QTemporaryDir temp;
+        QVERIFY(QDir(temp.path()).mkdir(QStringLiteral("space in path")));
+        const QDir outputDir(QDir(temp.path()).filePath(QStringLiteral("space in path")));
+        const QByteArray prefix = outputDir.filePath(QStringLiteral("video")).toUtf8();
+        logger_t *logger = logger_init();
+        QVERIFY(logger);
+        logger_set_callback(logger, discardLog, nullptr);
 
         GError *error = nullptr;
         GstElement *source = gst_parse_launch(
@@ -106,7 +127,7 @@ private slots:
                 mux_renderer_cache_video(map.data, static_cast<int>(map.size), false);
                 if (frame == 6) {
                     mux_renderer_init(logger, prefix.constData(), false, true);
-                    mux_renderer_choose_video_codec(false);
+                    QVERIFY(mux_renderer_choose_video_codec(false));
                     recording = true;
                 }
                 if (recording) {
@@ -118,8 +139,8 @@ private slots:
             ++frame;
             gst_sample_unref(sample);
             if (frame == 15) {
-                mux_renderer_stop();
-                mux_renderer_choose_video_codec(false);
+                QVERIFY(mux_renderer_stop());
+                QVERIFY(mux_renderer_choose_video_codec(false));
             }
         }
         gst_element_set_state(source, GST_STATE_NULL);
@@ -130,11 +151,11 @@ private slots:
 
         QCOMPARE(frame, 24);
         QCOMPARE(delivered, 18);
-        QVERIFY(QFileInfo(QDir(temp.path()).filePath(QStringLiteral("video-00000.mkv"))).size() > 1024);
-        QVERIFY(QFileInfo(QDir(temp.path()).filePath(QStringLiteral("video-00001.mkv"))).size() > 1024);
+        QVERIFY(QFileInfo(outputDir.filePath(QStringLiteral("video-00000.mkv"))).size() > 1024);
+        QVERIFY(QFileInfo(outputDir.filePath(QStringLiteral("video-00001.mkv"))).size() > 1024);
 
         const QString playback = QStringLiteral("splitmuxsrc location=\"%1/video-*.mkv\" ! decodebin ! fakesink")
-            .arg(QDir::fromNativeSeparators(temp.path()));
+            .arg(QDir::fromNativeSeparators(outputDir.path()));
         error = nullptr;
         GstElement *joined = gst_parse_launch(playback.toUtf8().constData(), &error);
         QVERIFY2(joined && !error, error ? error->message : "Could not join recovered fragments");
@@ -170,6 +191,25 @@ private slots:
         QVERIFY(!session.start(second.project, options));
         QCOMPARE(store.load(second.project.directory).project.state, ProjectState::Failed);
         uxplay_set_recording_test_mode(1);
+    }
+
+    void failedAirplayFinalizationKeepsTheProjectRecoverable() {
+        QTemporaryDir temp;
+        ProjectStore store(temp.path());
+        SceneDocument scene;
+        const auto created = store.create(scene);
+        FakePipelineRunner runner;
+        RecordingSession session(&store, &runner);
+        RecordingOptions options;
+        options.captureRect = QRect(0, 0, 640, 480);
+        QVERIFY(session.start(created.project, options));
+
+        uxplay_set_recording_test_stop_result(0);
+        QVERIFY(!session.stop());
+        uxplay_set_recording_test_stop_result(1);
+        QCOMPARE(session.state(), RecordingState::Failed);
+        QVERIFY(session.lastError().contains(QStringLiteral("AirPlay video track")));
+        QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Recoverable);
     }
 };
 
