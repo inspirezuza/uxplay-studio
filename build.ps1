@@ -337,7 +337,10 @@ function Write-BuildManifest {
             Where-Object { $_ -match $architectureConfig.PackagePrefix }
     }
 
-    $branch = [string](& git -C $projectRoot branch --show-current)
+    # In Windows PowerShell, casting an empty native-command pipeline to
+    # [string] still yields $null. Joining an explicit array guarantees an
+    # empty string for the detached checkout used by pull-request merge refs.
+    $branch = @(& git -C $projectRoot branch --show-current) -join [Environment]::NewLine
     $branch = $branch.Trim()
     if (-not $branch) {
         $branch = if ($env:GITHUB_HEAD_REF) {
