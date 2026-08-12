@@ -28,7 +28,9 @@ videoscale
 autovideosink
 d3d11videosink
 d3d11upload
+d3d11download
 d3d11convert
+d3d11screencapturesrc
 d3d12videosink
 
 # Cover art, metadata, rotation and recording
@@ -36,8 +38,21 @@ jpegdec
 imagefreeze
 textoverlay
 videoflip
+videocrop
+rotate
+cairooverlay
 mp4mux
 aacparse
+splitmuxsrc
+splitmuxsink
+matroskamux
+openh264enc
+mfh264enc
+avenc_aac
+mfvideosrc
+wasapi2src
+compositor
+audiomixer
 
 # HLS playback
 playbin

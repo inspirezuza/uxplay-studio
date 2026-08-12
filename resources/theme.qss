@@ -39,6 +39,19 @@ QWidget#card, QWidget#playerCard {
     border: 1px solid #24304a;
     border-radius: 16px;
 }
+QWidget#studioDock {
+    background: #111827;
+    border: 1px solid #27344b;
+    border-radius: 14px;
+}
+QLabel#dockTitle {
+    color: #8290a8;
+    font-size: 11px;
+    font-weight: 750;
+    letter-spacing: 1px;
+    padding-top: 3px;
+}
+QLabel#sessionMini { color: #dce5f7; font-weight: 650; }
 QLabel#cardTitle { font-size: 17px; font-weight: 700; color: #ffffff; }
 QLabel#mutedLabel { color: #8f9db5; }
 QLabel#miniBadge {
@@ -87,6 +100,35 @@ QPushButton#secondaryButton {
     padding: 8px 13px;
 }
 QPushButton#secondaryButton:hover { background: #21304d; border-color: #40557d; }
+QPushButton#segmentedButton {
+    background: #111a2d;
+    border: 1px solid #2b3a58;
+    border-radius: 8px;
+    color: #91a0b8;
+    padding: 6px 11px;
+    font-weight: 650;
+}
+QPushButton#segmentedButton:hover { color: #ffffff; border-color: #47618e; }
+QPushButton#segmentedButton:checked { background: #2c4475; color: #ffffff; border-color: #5d82ca; }
+QPushButton#tinyButton {
+    background: #172136;
+    border: 1px solid #2a3853;
+    border-radius: 7px;
+    color: #bdc8da;
+    padding: 5px 7px;
+    font-size: 11px;
+}
+QPushButton#tinyButton:hover { background: #22304b; color: #ffffff; }
+QPushButton#recordButton {
+    background: #d94d64;
+    border: 1px solid #f06b80;
+    border-radius: 9px;
+    color: #ffffff;
+    font-weight: 750;
+    padding: 9px 14px;
+}
+QPushButton#recordButton:hover { background: #e85a70; }
+QPushButton#recordButton[recording="true"] { background: #802f40; border-color: #d94d64; }
 QPushButton#fullscreenButton {
     background: #18233a;
     border: 1px solid #2b3a58;
@@ -105,7 +147,27 @@ QLineEdit, QComboBox {
     padding: 0 11px;
     selection-background-color: #607ff2;
 }
+QListWidget#sourceList, QListWidget#layerList, QListWidget#projectList {
+    background: #0b1220;
+    border: 1px solid #27354e;
+    border-radius: 9px;
+    color: #d8e0ed;
+    outline: 0;
+    padding: 4px;
+}
+QListWidget::item { border-radius: 6px; padding: 7px; }
+QListWidget::item:hover { background: #17233a; }
+QListWidget::item:selected { background: #2b4475; color: #ffffff; }
+QStackedWidget#previewStack, QGraphicsView#sceneCanvas {
+    background: #070b12;
+    border-radius: 10px;
+}
 QLineEdit:focus, QComboBox:focus { border: 1px solid #6c8cff; }
+QComboBox#compactCombo {
+    min-height: 30px;
+    font-size: 11px;
+    padding: 0 7px;
+}
 QLineEdit:disabled { color: #5e6b82; background: #0d1320; }
 QCheckBox { spacing: 10px; min-height: 28px; }
 QCheckBox::indicator {
