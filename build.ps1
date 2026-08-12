@@ -337,11 +337,23 @@ function Write-BuildManifest {
             Where-Object { $_ -match $architectureConfig.PackagePrefix }
     }
 
+    $branch = [string](& git -C $projectRoot branch --show-current)
+    $branch = $branch.Trim()
+    if (-not $branch) {
+        $branch = if ($env:GITHUB_HEAD_REF) {
+            $env:GITHUB_HEAD_REF
+        } elseif ($env:GITHUB_REF_NAME) {
+            $env:GITHUB_REF_NAME
+        } else {
+            "detached"
+        }
+    }
+
     $manifest = [ordered]@{
         generatedAtUtc = [DateTime]::UtcNow.ToString("o")
         architecture = $Architecture
-        branch = (& git -C $projectRoot branch --show-current).Trim()
-        commit = (& git -C $projectRoot rev-parse HEAD).Trim()
+        branch = $branch
+        commit = ([string](& git -C $projectRoot rev-parse HEAD)).Trim()
         libuxplayCommit = (Get-Content -Raw -LiteralPath (
             Join-Path $projectRoot "libuxplay\UPSTREAM_COMMIT"
         )).Trim()
