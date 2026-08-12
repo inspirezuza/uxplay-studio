@@ -7,14 +7,18 @@
 #include <QElapsedTimer>
 #include <QList>
 #include <QMainWindow>
+#include <memory>
 
 class QAction;
 class QCheckBox;
 class QComboBox;
 class QCloseEvent;
 class QKeyEvent;
+class QMoveEvent;
+class QResizeEvent;
 class QLabel;
 class QLineEdit;
+class QListWidget;
 class QHBoxLayout;
 class QPlainTextEdit;
 class QProcess;
@@ -22,32 +26,54 @@ class QPushButton;
 class QStackedWidget;
 class QSystemTrayIcon;
 class QTextEdit;
+class QThread;
 class QVBoxLayout;
 class QWidget;
 class ReceiverEngine;
 class VideoSurface;
+class SceneCanvas;
+class SceneDocument;
+class ProjectStore;
+class GstPipelineRunner;
+class RecordingSession;
+class ExportJob;
+struct ProjectInfo;
 struct ReceiverEvent;
 
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget *parent = nullptr, bool autoStart = true);
+    explicit MainWindow(QWidget *parent = nullptr, bool autoStart = true,
+                        const QString &projectRootOverride = {});
     ~MainWindow() override;
 
 protected:
     void closeEvent(QCloseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void moveEvent(QMoveEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     void setupUi();
     void setupTray();
     QWidget *createPlayerPage();
     QWidget *createActivityPage();
+    QWidget *createProjectsPage();
     QWidget *createSettingsPage();
     QWidget *createDiagnosticsPage();
     QPushButton *createNavigationButton(const QString &text, int page);
     void selectPage(int page);
+    void setStudioMode(bool edit);
+    void setSceneFormat(bool vertical);
+    void addStudioSource(int type);
+    void refreshLayerList();
+    void refreshProjectList();
+    void toggleRecording();
+    void exportCurrentProject();
+    void saveCurrentProject();
+    void refreshRecordingCapture();
+    void loadRecordedPreviews(const ProjectInfo &project);
 
     void startReceiver();
     void stopReceiver();
@@ -128,4 +154,26 @@ private:
     QSystemTrayIcon *m_tray = nullptr;
     QAction *m_trayReceiverAction = nullptr;
     QElapsedTimer m_sessionElapsed;
+
+    std::unique_ptr<SceneDocument> m_sceneDocument;
+    std::unique_ptr<ProjectStore> m_projectStore;
+    std::unique_ptr<GstPipelineRunner> m_pipelineRunner;
+    RecordingSession *m_recordingSession = nullptr;
+    ExportJob *m_exportJob = nullptr;
+    std::unique_ptr<ProjectInfo> m_currentProject;
+    SceneCanvas *m_sceneCanvas = nullptr;
+    QStackedWidget *m_previewStack = nullptr;
+    QListWidget *m_sourceList = nullptr;
+    QListWidget *m_layerList = nullptr;
+    QListWidget *m_projectList = nullptr;
+    QLabel *m_recordingStatus = nullptr;
+    QPushButton *m_recordButton = nullptr;
+    QPushButton *m_liveModeButton = nullptr;
+    QPushButton *m_editModeButton = nullptr;
+    QPushButton *m_wideButton = nullptr;
+    QPushButton *m_verticalButton = nullptr;
+    QCheckBox *m_recordCamera = nullptr;
+    QCheckBox *m_recordMicrophone = nullptr;
+    int m_sceneFormat = 0;
+    QList<QThread *> m_previewThreads;
 };

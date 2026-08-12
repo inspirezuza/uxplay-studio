@@ -39,6 +39,38 @@ function Get-RelativePath {
     ).Replace("/", $separator)
 }
 
+function Get-StableFileHash {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $stream = $null
+        $sha256 = $null
+        try {
+            $stream = [IO.File]::Open(
+                $Path,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::ReadWrite
+            )
+            $sha256 = [Security.Cryptography.SHA256]::Create()
+            $bytes = $sha256.ComputeHash($stream)
+            return ([BitConverter]::ToString($bytes)).Replace("-", "").ToLowerInvariant()
+        } catch {
+            if ($attempt -eq 3 -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                throw "Could not hash bundle file '$Path': $($_.Exception.Message)"
+            }
+        } finally {
+            if ($sha256) { $sha256.Dispose() }
+            if ($stream) { $stream.Dispose() }
+        }
+        Start-Sleep -Milliseconds (100 * $attempt)
+    }
+    throw "Could not hash bundle file '$Path'"
+}
+
 $stage = (Resolve-Path -LiteralPath $StageDir).Path
 $runtimeBin = Join-Path $MsysRoot "$EnvironmentName\bin"
 $objdump = Join-Path $runtimeBin "objdump.exe"
@@ -171,12 +203,11 @@ if (-not $ValidateOnly -and $ManifestPath) {
     $files = Get-ChildItem -LiteralPath $stage -Recurse -File |
         Sort-Object FullName |
         ForEach-Object {
+            $relativePath = Get-RelativePath -BasePath $stage -Path $_.FullName
             [ordered]@{
-                path = (Get-RelativePath -BasePath $stage -Path $_.FullName).
-                    Replace("\", "/")
+                path = $relativePath.Replace("\", "/")
                 bytes = $_.Length
-                sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.
-                    ToLowerInvariant()
+                sha256 = Get-StableFileHash -Path $_.FullName
             }
         }
 

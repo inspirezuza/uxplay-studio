@@ -4,6 +4,7 @@
 
 #include <QByteArray>
 #include <QDebug>
+#include <QImage>
 #include <vector>
 
 AirPlayWorker::AirPlayWorker(QObject *parent) : QThread(parent) {
@@ -36,9 +37,11 @@ void AirPlayWorker::run() {
 
     uxplay_set_video_window(static_cast<uintptr_t>(m_videoWindow));
     uxplay_set_event_callback(&AirPlayWorker::eventCallback, this);
+    uxplay_set_preview_callback(&AirPlayWorker::previewCallback, this);
     emit engineStarted();
     const int exitCode = start_uxplay(static_cast<int>(argv.size()), argv.data());
     uxplay_set_event_callback(nullptr, nullptr);
+    uxplay_set_preview_callback(nullptr, nullptr);
     emit engineExited(exitCode);
 }
 
@@ -61,4 +64,12 @@ void AirPlayWorker::eventCallback(const uxplay_event *event, void *context) {
     translated.width = event->width;
     translated.height = event->height;
     emit worker->receiverEvent(translated);
+}
+
+void AirPlayWorker::previewCallback(const unsigned char *data, int width, int height,
+                                    int stride, void *context) {
+    if (!data || width <= 0 || height <= 0 || stride <= 0 || !context) return;
+    auto *worker = static_cast<AirPlayWorker *>(context);
+    const QImage frame(data, width, height, stride, QImage::Format_ARGB32);
+    emit worker->previewFrame(frame.copy());
 }

@@ -23,6 +23,6 @@ The build runs the Qt unit tests automatically. Before a pull request, create an
 .\build.ps1 test -Architecture x64
 ```
 
-Keep the single-window invariant: embedded mode must never fall back to a separate GStreamer video window. Add or update tests for state, configuration, and UI-seam changes.
+Keep the single-window invariant: embedded mode must never fall back to a separate GStreamer video window. Do not insert recording work into the AirPlay decode/render pipeline. Project metadata writes must remain atomic and recording media must stay independently recoverable. Add or update focused tests for state, configuration, scene transforms, persistence, recording/export pipelines, and UI-seam changes.
 
 By contributing, you agree that your contribution is licensed under GPL-3.0-or-later.

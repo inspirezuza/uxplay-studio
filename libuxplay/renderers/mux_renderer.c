@@ -19,6 +19,7 @@
 
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
+#include <glib/gstdio.h>
 #include "mux_renderer.h"
 
 #define SECOND_IN_NSECS 1000000000UL
@@ -30,6 +31,13 @@ static gboolean no_audio = FALSE;
 static gboolean no_video = FALSE;
 static gboolean audio_is_alac = FALSE;
 static gboolean video_is_h265 = FALSE;
+static gboolean direct_video_only = FALSE;
+static gboolean mux_session_clean = TRUE;
+static gint next_direct_fragment = 0;
+static GBytes *cached_video_config = NULL;
+static gboolean cached_video_is_h265 = FALSE;
+static gint cached_video_codec = -1;
+static GMutex video_config_mutex;
 
 typedef struct mux_renderer_s {
     GstElement *pipeline;
@@ -43,12 +51,65 @@ typedef struct mux_renderer_s {
     gboolean audio_started;
     gboolean is_alac;
     gboolean is_h265;
+    gboolean failed;
+    guint64 video_buffers;
 } mux_renderer_t;
 
 static mux_renderer_t *renderer = NULL;
 
+static void discard_partial_renderer(void) {
+    if (!renderer) return;
+    if (renderer->pipeline) gst_element_set_state(renderer->pipeline, GST_STATE_NULL);
+    if (renderer->video_appsrc) gst_object_unref(renderer->video_appsrc);
+    if (renderer->audio_appsrc) gst_object_unref(renderer->audio_appsrc);
+    if (renderer->filesink) gst_object_unref(renderer->filesink);
+    if (renderer->bus) gst_object_unref(renderer->bus);
+    if (renderer->pipeline) gst_object_unref(renderer->pipeline);
+    g_free(renderer);
+    renderer = NULL;
+}
+
 static const char h264_caps[] = "video/x-h264,stream-format=(string)byte-stream,alignment=(string)au";
 static const char h265_caps[] = "video/x-h265,stream-format=(string)byte-stream,alignment=(string)au";
+
+void mux_renderer_reset_video_cache(void) {
+    g_mutex_lock(&video_config_mutex);
+    if (cached_video_config) {
+        g_bytes_unref(cached_video_config);
+        cached_video_config = NULL;
+    }
+    cached_video_is_h265 = FALSE;
+    g_atomic_int_set(&cached_video_codec, -1);
+    g_mutex_unlock(&video_config_mutex);
+}
+
+void mux_renderer_cache_video(unsigned char *data, int data_len, bool is_h265) {
+    if (!data || data_len < 6) return;
+    if (g_atomic_int_get(&cached_video_codec) == (is_h265 ? 1 : 0)) return;
+    gboolean contains_parameter_set = FALSE;
+    for (int i = 0; i + 5 < data_len; ++i) {
+        int offset = 0;
+        if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) offset = 3;
+        else if (i + 4 < data_len && data[i] == 0 && data[i + 1] == 0 &&
+                 data[i + 2] == 0 && data[i + 3] == 1) offset = 4;
+        if (!offset) continue;
+        const unsigned char type = is_h265 ? (data[i + offset] >> 1) & 0x3f
+                                           : data[i + offset] & 0x1f;
+        if ((!is_h265 && (type == 7 || type == 8)) ||
+            (is_h265 && (type == 32 || type == 33 || type == 34))) {
+            contains_parameter_set = TRUE;
+            break;
+        }
+    }
+    if (!contains_parameter_set) return;
+    GBytes *replacement = g_bytes_new(data, (gsize) data_len);
+    g_mutex_lock(&video_config_mutex);
+    if (cached_video_config) g_bytes_unref(cached_video_config);
+    cached_video_config = replacement;
+    cached_video_is_h265 = is_h265;
+    g_atomic_int_set(&cached_video_codec, is_h265 ? 1 : 0);
+    g_mutex_unlock(&video_config_mutex);
+}
 
 static const char aac_eld_caps[] = "audio/mpeg,mpegversion=(int)4,channels=(int)2,rate=(int)44100,stream-format=raw,codec_data=(buffer)f8e85000";
 static const char alac_caps[] = "audio/x-alac,mpegversion=(int)4,channels=(int)2,rate=(int)44100,stream-format=raw,codec_data=(buffer)"
@@ -59,6 +120,9 @@ void mux_renderer_init(logger_t *render_logger, const char *filename, bool use_a
     logger = render_logger;
     no_audio = !use_audio;
     no_video = !use_video;
+    direct_video_only = no_audio && !no_video;
+    mux_session_clean = TRUE;
+    if (direct_video_only) g_atomic_int_set(&next_direct_fragment, 0);
     if (no_audio && no_video) {
         logger_log(logger, LOGGER_INFO, "both audio and video rendering are disabled: nothing to record: (not starting mux renderer)");
         return;
@@ -73,14 +137,35 @@ void mux_renderer_init(logger_t *render_logger, const char *filename, bool use_a
 }
 
 static
-void mux_renderer_start(void) {
+gchar *direct_fragment_location(GstElement *splitmux, guint fragment_id, gpointer user_data) {
+    (void) splitmux;
+    (void) user_data;
+    g_atomic_int_set(&next_direct_fragment, (gint) fragment_id + 1);
+    return g_strdup_printf("%s-%05u.mkv", output_filename, fragment_id);
+}
+
+static gboolean direct_output_exists(void) {
+    if (!direct_video_only || !output_filename) return TRUE;
+    const gint fragment_count = g_atomic_int_get(&next_direct_fragment);
+    for (gint fragment = 0; fragment < fragment_count; ++fragment) {
+        gchar *path = g_strdup_printf("%s-%05d.mkv", output_filename, fragment);
+        GStatBuf stat_buffer;
+        const gboolean valid = g_stat(path, &stat_buffer) == 0 && stat_buffer.st_size > 0;
+        g_free(path);
+        if (valid) return TRUE;
+    }
+    return FALSE;
+}
+
+static
+bool mux_renderer_start(void) {
     GError *error = NULL;
     GstCaps *video_caps = NULL;
     GstCaps *audio_caps = NULL;
 
     if (renderer && renderer->pipeline) {
         logger_log(logger, LOGGER_DEBUG, "Mux renderer already running");
-        return;
+        return mux_session_clean && !renderer->failed;
     }
 
     mux_renderer_destroy();
@@ -98,21 +183,25 @@ void mux_renderer_start(void) {
 
     file_count++;
     GString *filename = g_string_new("");
-    g_string_append(filename, g_strdup_printf("%s.%d.", output_filename, file_count));
-    if (!no_video && !audio_is_alac) {
+    if (direct_video_only) {
+        g_string_append_printf(filename, "%s-%%05d.mkv", output_filename);
+    } else {
+        g_string_append_printf(filename, "%s.%d.", output_filename, file_count);
+    }
+    if (!direct_video_only && !no_video && !audio_is_alac) {
         if (video_is_h265) {
             g_string_append(filename,"H265.");
         } else {
             g_string_append(filename,"H264.");
         }
-    } if (!no_audio) {
+    } if (!direct_video_only && !no_audio) {
         if (audio_is_alac) {
             g_string_append(filename,"ALAC.");
         } else {
             g_string_append(filename,"AAC.");
         }
     }
-    g_string_append(filename, "mp4");
+    if (!direct_video_only) g_string_append(filename, "mp4");
     
     GString *launch = g_string_new("");
 
@@ -132,23 +221,39 @@ void mux_renderer_start(void) {
         }
         g_string_append(launch, "mux. ");
     }
-    g_string_append(launch, "mp4mux name=mux ! filesink name=filesink location=");
-    g_string_append(launch, filename->str);
+    if (direct_video_only) {
+        g_string_append_printf(launch,
+            "splitmuxsink name=mux muxer-factory=matroskamux max-size-time=30000000000 "
+            "async-finalize=true start-index=%d location=\"unused.mkv\"",
+            g_atomic_int_get(&next_direct_fragment));
+    } else {
+        g_string_append(launch, "mp4mux name=mux ! filesink name=filesink location=\"unused.mp4\"");
+    }
 
     logger_log(logger, LOGGER_DEBUG, "created Mux pipeline: %s", launch->str);
 
     renderer->pipeline = gst_parse_launch(launch->str, &error);
 
     g_string_free(launch, TRUE);
-    if (error) {
-        logger_log(logger, LOGGER_ERR, "Mux pipeline error: %s", error->message);
+    if (error || !renderer->pipeline) {
+        logger_log(logger, LOGGER_ERR, "Mux pipeline error: %s",
+                   error ? error->message : "pipeline was not created");
         g_clear_error(&error);
-        g_free(filename);
-        return;
+        discard_partial_renderer();
+        g_string_free(filename, TRUE);
+        mux_session_clean = FALSE;
+        return false;
     }
 
     if (!no_video && !audio_is_alac) {
         renderer->video_appsrc = gst_bin_get_by_name(GST_BIN(renderer->pipeline), "video_src");
+        if (!renderer->video_appsrc) {
+            logger_log(logger, LOGGER_ERR, "Mux pipeline has no video input");
+            g_string_free(filename, TRUE);
+            mux_session_clean = FALSE;
+            discard_partial_renderer();
+            return false;
+        }
         if (renderer->is_h265) {
             video_caps = gst_caps_from_string(h265_caps);
         } else {
@@ -170,11 +275,54 @@ void mux_renderer_start(void) {
     }
 
     renderer->filesink = gst_bin_get_by_name(GST_BIN(renderer->pipeline), "filesink");
+    if (renderer->filesink) g_object_set(renderer->filesink, "location", filename->str, NULL);
+    if (direct_video_only) {
+        GstElement *splitmux = gst_bin_get_by_name(GST_BIN(renderer->pipeline), "mux");
+        if (splitmux) {
+            g_object_set(splitmux, "location", filename->str, NULL);
+            g_signal_connect(splitmux, "format-location", G_CALLBACK(direct_fragment_location), NULL);
+            gst_object_unref(splitmux);
+        }
+    }
     renderer->bus = gst_element_get_bus(renderer->pipeline);
+    if (!renderer->bus) {
+        logger_log(logger, LOGGER_ERR, "Mux pipeline has no message bus");
+        g_string_free(filename, TRUE);
+        mux_session_clean = FALSE;
+        discard_partial_renderer();
+        return false;
+    }
 
-    gst_element_set_state(renderer->pipeline, GST_STATE_PLAYING);
+    const GstStateChangeReturn state_result = gst_element_set_state(renderer->pipeline, GST_STATE_PLAYING);
+    if (state_result == GST_STATE_CHANGE_FAILURE) {
+        logger_log(logger, LOGGER_ERR, "Mux pipeline could not enter PLAYING state");
+        g_string_free(filename, TRUE);
+        mux_session_clean = FALSE;
+        discard_partial_renderer();
+        return false;
+    }
+    GBytes *video_config = NULL;
+    g_mutex_lock(&video_config_mutex);
+    if (cached_video_config && cached_video_is_h265 == renderer->is_h265)
+        video_config = g_bytes_ref(cached_video_config);
+    g_mutex_unlock(&video_config_mutex);
+    if (direct_video_only && video_config && renderer->video_appsrc) {
+        gsize size = 0;
+        gconstpointer data = g_bytes_get_data(video_config, &size);
+        GstBuffer *header = gst_buffer_new_allocate(NULL, size, NULL);
+        if (header) {
+            gst_buffer_fill(header, 0, data, size);
+            GST_BUFFER_PTS(header) = 0;
+            GST_BUFFER_DTS(header) = 0;
+            const GstFlowReturn flow = gst_app_src_push_buffer(GST_APP_SRC(renderer->video_appsrc), header);
+            if (flow != GST_FLOW_OK) renderer->failed = TRUE;
+        }
+    }
+    if (video_config) g_bytes_unref(video_config);
     logger_log(logger, LOGGER_INFO, "Started recording to: %s", filename->str);
     g_string_free(filename, TRUE);
+    if (renderer->failed) mux_session_clean = FALSE;
+    return mux_session_clean;
 }
 
 /* called by audio_get_format callback in uxplay.cpp, from raop_handlers.h */
@@ -193,14 +341,14 @@ void mux_renderer_choose_audio_codec(unsigned char audio_ct) {
 }
 
 /* called by video_set_codec calback in uxplay.cpp, from raop_rtp_mirror */
-void mux_renderer_choose_video_codec(bool is_h265) {
+bool mux_renderer_choose_video_codec(bool is_h265) {
     video_is_h265 = is_h265;
     if (renderer && renderer->pipeline && renderer->is_h265 != video_is_h265) {
         logger_log(logger, LOGGER_DEBUG, "Video codec changed, recreating mux renderer");
         mux_renderer_destroy();
     }
     logger_log(logger, LOGGER_DEBUG, "Mux renderer video codec: h265=%s", is_h265 ? "true" : "false");
-    mux_renderer_start();
+    return mux_renderer_start();
 }
 
 /* called by video_process callback in uxplay.cpp*/
@@ -224,7 +372,9 @@ void mux_renderer_push_video(unsigned char *data, int data_len, uint64_t ntp_tim
     GstClockTime pts = (GstClockTime)ntp_time - renderer->base_time;
     GST_BUFFER_PTS(buffer) = pts;
     GST_BUFFER_DTS(buffer) = pts;
-    gst_app_src_push_buffer(GST_APP_SRC(renderer->video_appsrc), buffer);
+    const GstFlowReturn flow = gst_app_src_push_buffer(GST_APP_SRC(renderer->video_appsrc), buffer);
+    if (flow != GST_FLOW_OK) renderer->failed = TRUE;
+    else renderer->video_buffers++;
 }
 
 /* called by audio_process callback in uxplay.cpp*/
@@ -275,19 +425,37 @@ void mux_renderer_push_audio(unsigned char *data, int data_len, uint64_t ntp_tim
 }
 
 /* called by conn_destroy callback in uxplay.cpp, and when video resets */
-void mux_renderer_stop(void) {
-    if (!renderer || !renderer->pipeline) return;
+bool mux_renderer_stop(void) {
+    if (!renderer || !renderer->pipeline) return mux_session_clean;
+
+    gboolean clean = !renderer->failed;
+    const gboolean has_video_data = no_video || renderer->video_buffers > 0;
 
     if (renderer->video_appsrc) {
-        gst_app_src_end_of_stream(GST_APP_SRC(renderer->video_appsrc));
+        if (gst_app_src_end_of_stream(GST_APP_SRC(renderer->video_appsrc)) != GST_FLOW_OK)
+            clean = FALSE;
     }
     if (renderer->audio_appsrc) {
-        gst_app_src_end_of_stream(GST_APP_SRC(renderer->audio_appsrc));
+        if (gst_app_src_end_of_stream(GST_APP_SRC(renderer->audio_appsrc)) != GST_FLOW_OK)
+            clean = FALSE;
     }
 
     GstMessage *msg = gst_bus_timed_pop_filtered(renderer->bus, 5 * GST_SECOND,
         GST_MESSAGE_EOS | GST_MESSAGE_ERROR);
-    if (msg) {
+    if (!msg) {
+        logger_log(logger, LOGGER_ERR, "Timed out while finalizing the recording");
+        clean = FALSE;
+    } else {
+        if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR) {
+            GError *error = NULL;
+            gchar *debug = NULL;
+            gst_message_parse_error(msg, &error, &debug);
+            logger_log(logger, LOGGER_ERR, "Recording pipeline failed: %s",
+                       error ? error->message : "unknown error");
+            g_clear_error(&error);
+            g_free(debug);
+            clean = FALSE;
+        }
         gst_message_unref(msg);
     }
 
@@ -301,17 +469,25 @@ void mux_renderer_stop(void) {
         gst_object_unref(renderer->audio_appsrc);
         renderer->audio_appsrc = NULL;
     }
-    gst_object_unref(renderer->filesink);
-    renderer->filesink = NULL;
+    if (renderer->filesink) {
+        gst_object_unref(renderer->filesink);
+        renderer->filesink = NULL;
+    }
     gst_object_unref(renderer->bus);
     renderer->bus = NULL;
     gst_object_unref(renderer->pipeline);
     renderer->pipeline = NULL;
 
     renderer->base_time = GST_CLOCK_TIME_NONE;
+    if (!has_video_data || !direct_output_exists()) {
+        logger_log(logger, LOGGER_ERR, "Recording finalized without a usable video segment");
+        clean = FALSE;
+    }
     logger_log(logger, LOGGER_INFO, "Stopped recording");
     audio_is_alac = FALSE;
     video_is_h265 = FALSE;
+    if (!clean) mux_session_clean = FALSE;
+    return mux_session_clean;
 }
 
 void mux_renderer_destroy(void) {

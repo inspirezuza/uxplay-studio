@@ -6,7 +6,9 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QProcessEnvironment>
+#include <QPushButton>
 #include <QTextStream>
+#include <QTimer>
 
 #include <gst/gst.h>
 #include <gst/video/videooverlay.h>
@@ -145,8 +147,24 @@ int main(int argc, char *argv[]) {
     }
 #endif
 
-    MainWindow window;
+    MainWindow window(nullptr, !app.arguments().contains(QStringLiteral("--no-autostart")));
     window.show();
+    if (app.arguments().contains(QStringLiteral("--snapshot-edit"))) {
+        for (QPushButton *button : window.findChildren<QPushButton *>())
+            if (button->text() == QStringLiteral("Edit layout")) button->click();
+    }
+    if (app.arguments().contains(QStringLiteral("--snapshot-fullscreen"))) {
+        if (auto *button = window.findChild<QPushButton *>(QStringLiteral("fullscreenButton")))
+            button->click();
+    }
+    for (const QString &argument : app.arguments()) {
+        if (!argument.startsWith(QStringLiteral("--ui-snapshot="))) continue;
+        const QString output = argument.mid(QStringLiteral("--ui-snapshot=").size());
+        QTimer::singleShot(250, &window, [&window, output]() {
+            window.grab().save(output, "PNG");
+            qApp->quit();
+        });
+    }
     const int result = app.exec();
 #ifdef Q_OS_WIN
     if (singleInstance) CloseHandle(singleInstance);

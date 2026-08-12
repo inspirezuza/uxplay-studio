@@ -31,10 +31,12 @@ extern "C" {
 
 void mux_renderer_init(logger_t *logger, const char *filename, bool use_audio, bool use_video);
 void mux_renderer_choose_audio_codec(unsigned char audio_ct);
-void mux_renderer_choose_video_codec(bool is_h265);
+bool mux_renderer_choose_video_codec(bool is_h265);
 void mux_renderer_push_video(unsigned char *data, int data_len, uint64_t ntp_time);
+void mux_renderer_cache_video(unsigned char *data, int data_len, bool is_h265);
+void mux_renderer_reset_video_cache(void);
 void mux_renderer_push_audio(unsigned char *data, int data_len, uint64_t ntp_time);
-void mux_renderer_stop(void);
+bool mux_renderer_stop(void);
 void mux_renderer_destroy(void);
 
 #ifdef __cplusplus

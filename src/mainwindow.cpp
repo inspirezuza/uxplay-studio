@@ -3,7 +3,13 @@
 #include "airplayworker.h"
 #include "mdns_responder.hpp"
 #include "networkdiagnostics.h"
+#include "projects/projectstore.h"
+#include "recording/gstpipelinerunner.h"
+#include "recording/recordingsession.h"
 #include "receiverengine.h"
+#include "export/exportjob.h"
+#include "studio/scenecanvas.h"
+#include "studio/scenedocument.h"
 #include "videosurface.h"
 #include "uxplay_api.h"
 
@@ -11,24 +17,35 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFormLayout>
 #include <QGuiApplication>
+#include <QImage>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QInputDialog>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMoveEvent>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
+#include <QResizeEvent>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStackedWidget>
@@ -37,7 +54,14 @@
 #include <QTextDocument>
 #include <QTextEdit>
 #include <QTimer>
+#include <QThread>
+#include <QUrl>
 #include <QVBoxLayout>
+
+#include <functional>
+#include <utility>
+#include <gst/app/gstappsink.h>
+#include <gst/video/video.h>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -78,22 +102,115 @@ QString formatDuration(qint64 seconds) {
         .arg(minutes, 2, 10, QLatin1Char('0'))
         .arg(remaining, 2, 10, QLatin1Char('0'));
 }
+
+QImage loadVideoPreview(const QString &path) {
+    if (path.isEmpty() || !QFileInfo::exists(path)) return {};
+    QString escaped = QDir::toNativeSeparators(path);
+    escaped.replace('\\', QStringLiteral("\\\\"));
+    escaped.replace('"', QStringLiteral("\\\""));
+    const QString description = QStringLiteral(
+        "filesrc location=\"%1\" ! decodebin ! videoconvert ! videoscale ! "
+        "video/x-raw,format=BGRA,width=960 ! appsink name=preview sync=false max-buffers=1 drop=true")
+        .arg(escaped);
+    GError *error = nullptr;
+    GstElement *pipeline = gst_parse_launch(description.toUtf8().constData(), &error);
+    if (!pipeline || error) {
+        if (error) g_error_free(error);
+        if (pipeline) gst_object_unref(pipeline);
+        return {};
+    }
+    GstElement *sink = gst_bin_get_by_name(GST_BIN(pipeline), "preview");
+    gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    GstSample *sample = sink ? gst_app_sink_try_pull_sample(GST_APP_SINK(sink), 5 * GST_SECOND) : nullptr;
+    QImage image;
+    if (sample) {
+        GstVideoInfo info;
+        GstMapInfo map;
+        GstCaps *caps = gst_sample_get_caps(sample);
+        GstBuffer *buffer = gst_sample_get_buffer(sample);
+        if (caps && buffer && gst_video_info_from_caps(&info, caps) &&
+            gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+            image = QImage(map.data, GST_VIDEO_INFO_WIDTH(&info), GST_VIDEO_INFO_HEIGHT(&info),
+                           GST_VIDEO_INFO_PLANE_STRIDE(&info, 0), QImage::Format_ARGB32).copy();
+            gst_buffer_unmap(buffer, &map);
+        }
+        gst_sample_unref(sample);
+    }
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    if (sink) gst_object_unref(sink);
+    gst_object_unref(pipeline);
+    return image;
+}
 }
 
-MainWindow::MainWindow(QWidget *parent, bool autoStart)
+MainWindow::MainWindow(QWidget *parent, bool autoStart, const QString &projectRootOverride)
     : QMainWindow(parent), m_autoStart(autoStart) {
     m_config = SettingsStore::load();
     m_config.autostart = autostartEnabled();
     m_engine = new ReceiverEngine(this);
 
+    m_sceneDocument = std::make_unique<SceneDocument>();
+    m_sceneDocument->setTitle(QStringLiteral("Untitled recording"));
+    const QString airplay = m_sceneDocument->addSource(SceneSourceType::AirPlay,
+                                                        QStringLiteral("iPad screen"));
+    m_sceneDocument->addLayer(SceneFormat::Wide, airplay);
+    m_sceneDocument->addLayer(SceneFormat::Vertical, airplay);
+    QString projectRoot = projectRootOverride;
+    if (projectRoot.isEmpty()) projectRoot = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    if (projectRoot.isEmpty()) projectRoot = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    projectRoot = QDir(projectRoot).filePath(QStringLiteral("UxPlay Studio"));
+    m_projectStore = std::make_unique<ProjectStore>(projectRoot);
+    m_projectStore->recoverableProjects();
+    m_pipelineRunner = std::make_unique<GstPipelineRunner>();
+    m_recordingSession = new RecordingSession(m_projectStore.get(), m_pipelineRunner.get(), this);
+    m_exportJob = new ExportJob(m_projectStore.get(), this);
+
     setupUi();
     setupTray();
     loadConfigIntoControls();
+
+    connect(m_recordingSession, &RecordingSession::stateChanged, this,
+            [this](RecordingState state) {
+        if (!m_recordButton || !m_recordingStatus) return;
+        const bool active = state == RecordingState::Recording || state == RecordingState::Finalizing;
+        m_recordButton->setText(active ? QStringLiteral("Stop recording") : QStringLiteral("Record"));
+        m_recordButton->setProperty("recording", active);
+        refreshStyle(m_recordButton);
+        m_recordingStatus->setText(state == RecordingState::Recording ? QStringLiteral("● REC · independent tracks") :
+                                   state == RecordingState::Finalizing ? QStringLiteral("Finalizing media safely…") :
+                                   state == RecordingState::Failed ? QStringLiteral("Recording needs attention") :
+                                   QStringLiteral("Ready to record"));
+        refreshProjectList();
+        if (state == RecordingState::Idle && m_currentProject)
+            loadRecordedPreviews(*m_currentProject);
+    });
+    connect(m_recordingSession, &RecordingSession::warningRaised, this,
+            [this](const QString &message) { appendActivity(QStringLiteral("Recording"), message); });
+    connect(m_exportJob, &ExportJob::started, this, [this](const QString &) {
+        if (m_recordingStatus) m_recordingStatus->setText(QStringLiteral("Exporting in background…"));
+    });
+    connect(m_exportJob, &ExportJob::finished, this, [this](const QString &path) {
+        if (m_recordingStatus) m_recordingStatus->setText(QStringLiteral("Export ready · %1").arg(QFileInfo(path).fileName()));
+        refreshProjectList();
+    });
+    connect(m_exportJob, &ExportJob::failed, this, [this](const QString &message) {
+        if (m_recordingStatus) m_recordingStatus->setText(QStringLiteral("Export failed · %1").arg(message));
+        refreshProjectList();
+    });
 
     connect(m_engine, &ReceiverEngine::stateChanged,
             this, &MainWindow::handleStateChanged);
     connect(m_engine, &ReceiverEngine::eventReceived,
             this, &MainWindow::handleReceiverEvent);
+    connect(m_engine, &ReceiverEngine::previewFrame, this, [this](const QImage &frame) {
+        if (!m_sceneCanvas || !m_sceneDocument) return;
+        for (const SceneSource &source : m_sceneDocument->sources()) {
+            if (source.type == SceneSourceType::AirPlay) {
+                m_sceneCanvas->setSourcePreview(source.id, frame);
+                break;
+            }
+        }
+    });
     connect(m_engine, &ReceiverEngine::recoveryScheduled, this, [this](int delayMs) {
         appendActivity(QStringLiteral("Recovery"),
                        QStringLiteral("Receiver will retry in %1 second(s).")
@@ -118,6 +235,13 @@ MainWindow::~MainWindow() {
         m_cursorOverride = false;
     }
     stopBluetoothBeacon();
+    for (QThread *thread : std::as_const(m_previewThreads)) {
+        if (thread && thread->isRunning()) thread->wait();
+    }
+    delete m_recordingSession;
+    m_recordingSession = nullptr;
+    delete m_exportJob;
+    m_exportJob = nullptr;
 }
 
 void MainWindow::setupUi() {
@@ -146,10 +270,11 @@ void MainWindow::setupUi() {
     sidebarLayout->addWidget(m_sidebarReceiver);
     sidebarLayout->addSpacing(24);
 
-    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Player"), 0));
-    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Activity"), 1));
-    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Settings"), 2));
-    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Diagnostics"), 3));
+    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Studio"), 0));
+    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Projects"), 1));
+    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Activity"), 2));
+    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Settings"), 3));
+    sidebarLayout->addWidget(createNavigationButton(QStringLiteral("Diagnostics"), 4));
     sidebarLayout->addStretch();
 
     auto *opensource = mutedLabel(
@@ -169,7 +294,7 @@ void MainWindow::setupUi() {
     m_header->setFixedHeight(84);
     auto *headerLayout = new QHBoxLayout(m_header);
     headerLayout->setContentsMargins(30, 18, 30, 18);
-    m_pageTitle = new QLabel(QStringLiteral("Player"), m_header);
+    m_pageTitle = new QLabel(QStringLiteral("Studio"), m_header);
     m_pageTitle->setObjectName(QStringLiteral("pageTitle"));
     headerLayout->addWidget(m_pageTitle);
     headerLayout->addStretch();
@@ -184,6 +309,7 @@ void MainWindow::setupUi() {
 
     m_pages = new QStackedWidget(content);
     m_pages->addWidget(createPlayerPage());
+    m_pages->addWidget(createProjectsPage());
     m_pages->addWidget(createActivityPage());
     m_pages->addWidget(createSettingsPage());
     m_pages->addWidget(createDiagnosticsPage());
@@ -207,7 +333,7 @@ void MainWindow::selectPage(int page) {
         return;
     }
     static const QStringList titles {
-        QStringLiteral("Player"), QStringLiteral("Activity"),
+        QStringLiteral("Studio"), QStringLiteral("Projects"), QStringLiteral("Activity"),
         QStringLiteral("Settings"), QStringLiteral("Diagnostics")
     };
     m_pages->setCurrentIndex(page);
@@ -215,10 +341,252 @@ void MainWindow::selectPage(int page) {
     for (int index = 0; index < m_navigationButtons.size(); ++index) {
         m_navigationButtons[index]->setChecked(index == page);
     }
-    if (page == 3) {
+    if (page == 1) refreshProjectList();
+    if (page == 4) {
         refreshDiagnostics();
     }
 }
+
+void MainWindow::setStudioMode(bool edit) {
+    if (!m_previewStack) return;
+    m_previewStack->setCurrentIndex(edit ? 1 : 0);
+    m_liveModeButton->setChecked(!edit);
+    m_editModeButton->setChecked(edit);
+}
+
+void MainWindow::setSceneFormat(bool vertical) {
+    m_sceneFormat = static_cast<int>(vertical ? SceneFormat::Vertical : SceneFormat::Wide);
+    m_wideButton->setChecked(!vertical);
+    m_verticalButton->setChecked(vertical);
+    m_sceneCanvas->setFormat(static_cast<SceneFormat>(m_sceneFormat));
+    refreshLayerList();
+    setStudioMode(true);
+}
+
+void MainWindow::addStudioSource(int type) {
+    SceneSourceType sourceType = SceneSourceType::Camera;
+    QString name = QStringLiteral("Presenter camera");
+    QString uri;
+    if (type == 2) {
+        sourceType = SceneSourceType::Image;
+        uri = QFileDialog::getOpenFileName(this, QStringLiteral("Add image"), {},
+                                           QStringLiteral("Images (*.png *.jpg *.jpeg *.webp *.bmp)"));
+        if (uri.isEmpty()) return;
+        name = QFileInfo(uri).completeBaseName();
+    } else if (type == 3) {
+        sourceType = SceneSourceType::Text;
+        bool ok = false;
+        name = QInputDialog::getText(this, QStringLiteral("Add text"), QStringLiteral("Text"),
+                                     QLineEdit::Normal, QStringLiteral("Title"), &ok).trimmed();
+        if (!ok || name.isEmpty()) return;
+    } else if (type == 4) {
+        sourceType = SceneSourceType::Color;
+        name = QStringLiteral("Color background");
+        const QColor color = QColorDialog::getColor(QColor(QStringLiteral("#24345c")), this,
+                                                     QStringLiteral("Choose layer color"));
+        if (!color.isValid()) return;
+        uri = color.name(QColor::HexRgb);
+    }
+    const QString sourceId = m_sceneDocument->addSource(sourceType, name, uri);
+    const QString wide = m_sceneDocument->addLayer(SceneFormat::Wide, sourceId);
+    const QString vertical = m_sceneDocument->addLayer(SceneFormat::Vertical, sourceId);
+    if (sourceType == SceneSourceType::Camera) {
+        SceneTransform wideTransform = m_sceneDocument->layer(SceneFormat::Wide, wide)->transform;
+        wideTransform.frame = QRectF(1480, 690, 360, 300);
+        wideTransform.mask = SceneMask::RoundedRectangle;
+        m_sceneDocument->setTransform(SceneFormat::Wide, wide, wideTransform);
+        SceneTransform verticalTransform = m_sceneDocument->layer(SceneFormat::Vertical, vertical)->transform;
+        verticalTransform.frame = QRectF(680, 1480, 320, 320);
+        verticalTransform.mask = SceneMask::Circle;
+        m_sceneDocument->setTransform(SceneFormat::Vertical, vertical, verticalTransform);
+    }
+    m_sceneCanvas->setDocument(m_sceneDocument.get(), static_cast<SceneFormat>(m_sceneFormat));
+    refreshLayerList();
+    m_sceneCanvas->selectLayer(m_sceneFormat == static_cast<int>(SceneFormat::Wide) ? wide : vertical);
+    setStudioMode(true);
+    saveCurrentProject();
+}
+
+void MainWindow::refreshLayerList() {
+    if (!m_sourceList || !m_layerList || !m_sceneDocument) return;
+    {
+        QSignalBlocker sourceBlocker(m_sourceList);
+        m_sourceList->clear();
+        for (const SceneSource &source : m_sceneDocument->sources()) {
+            QString kind;
+            switch (source.type) {
+            case SceneSourceType::AirPlay: kind = QStringLiteral("AirPlay"); break;
+            case SceneSourceType::Camera: kind = QStringLiteral("Camera"); break;
+            case SceneSourceType::Image: kind = QStringLiteral("Image"); break;
+            case SceneSourceType::Text: kind = QStringLiteral("Text"); break;
+            case SceneSourceType::Color: kind = QStringLiteral("Color"); break;
+            }
+            auto *item = new QListWidgetItem(QStringLiteral("%1   %2").arg(kind, source.name), m_sourceList);
+            item->setData(Qt::UserRole, source.id);
+        }
+    }
+    QSignalBlocker layerBlocker(m_layerList);
+    m_layerList->clear();
+    const auto &layers = m_sceneDocument->composition(static_cast<SceneFormat>(m_sceneFormat)).layers;
+    for (auto it = layers.crbegin(); it != layers.crend(); ++it) {
+        auto *item = new QListWidgetItem((it->locked ? QStringLiteral("🔒  ") : QStringLiteral("◇  ")) + it->name,
+                                         m_layerList);
+        item->setData(Qt::UserRole, it->id);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsDragEnabled);
+        item->setCheckState(it->visible ? Qt::Checked : Qt::Unchecked);
+        if (it->locked) item->setForeground(QColor(QStringLiteral("#71809a")));
+    }
+}
+
+void MainWindow::refreshProjectList() {
+    if (!m_projectList || !m_projectStore) return;
+    QSignalBlocker blocker(m_projectList);
+    m_projectList->clear();
+    const auto projects = m_projectStore->projects();
+    for (const ProjectSummary &project : projects) {
+        const QString state = projectStateKey(project.state).toUpper();
+        auto *item = new QListWidgetItem(QStringLiteral("%1\n%2  ·  %3")
+            .arg(project.title.isEmpty() ? QStringLiteral("Untitled recording") : project.title,
+                 project.updatedAtUtc.toLocalTime().toString(QStringLiteral("dd MMM yyyy  HH:mm")), state),
+            m_projectList);
+        item->setData(Qt::UserRole, project.directory);
+        item->setSizeHint(QSize(0, 58));
+        if (project.state == ProjectState::Recoverable) item->setForeground(QColor(QStringLiteral("#f6c85f")));
+    }
+}
+
+void MainWindow::toggleRecording() {
+    if (m_recordingSession->state() == RecordingState::Recording) {
+        m_recordingSession->stop();
+        return;
+    }
+    if (m_engine->state() != ReceiverState::Mirroring) {
+        m_recordingStatus->setText(QStringLiteral("Connect an iPad before recording"));
+        return;
+    }
+    setStudioMode(false);
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    m_sceneDocument->setTitle(QStringLiteral("Recording %1")
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH-mm"))));
+    const auto created = m_projectStore->create(*m_sceneDocument);
+    if (!created.ok()) { m_recordingStatus->setText(created.error); return; }
+    m_currentProject = std::make_unique<ProjectInfo>(created.project);
+    QWidget *target = m_videoSurface->findChild<QWidget *>(QStringLiteral("nativeVideoTarget"));
+    if (!target) target = m_videoSurface;
+    const qreal scale = target->devicePixelRatioF();
+    const QPoint global = target->mapToGlobal(QPoint(0, 0));
+    RecordingOptions options;
+#ifdef Q_OS_WIN
+    const HWND targetWindow = reinterpret_cast<HWND>(target->winId());
+    RECT targetRect{};
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    const HMONITOR monitor = MonitorFromWindow(targetWindow, MONITOR_DEFAULTTONEAREST);
+    if (GetWindowRect(targetWindow, &targetRect) && GetMonitorInfoW(monitor, &monitorInfo)) {
+        options.monitorHandle = reinterpret_cast<quint64>(monitor);
+        options.captureRect = QRect(targetRect.left - monitorInfo.rcMonitor.left,
+                                    targetRect.top - monitorInfo.rcMonitor.top,
+                                    targetRect.right - targetRect.left,
+                                    targetRect.bottom - targetRect.top);
+    } else
+#endif
+    options.captureRect = QRect(qRound(global.x() * scale), qRound(global.y() * scale),
+                                qRound(target->width() * scale), qRound(target->height() * scale));
+    options.camera = m_recordCamera->isChecked();
+    options.microphone = m_recordMicrophone->isChecked();
+    options.systemAudio = true;
+    if (!m_recordingSession->start(*m_currentProject, options))
+        m_recordingStatus->setText(m_recordingSession->lastError());
+}
+
+void MainWindow::refreshRecordingCapture() {
+    if (!m_recordingSession || m_recordingSession->state() != RecordingState::Recording || !m_videoSurface)
+        return;
+    QWidget *target = m_videoSurface->findChild<QWidget *>(QStringLiteral("nativeVideoTarget"));
+    if (!target) target = m_videoSurface;
+    quint64 monitorHandle = 0;
+    QRect captureRect;
+#ifdef Q_OS_WIN
+    const HWND targetWindow = reinterpret_cast<HWND>(target->winId());
+    RECT targetRect{};
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    const HMONITOR monitor = MonitorFromWindow(targetWindow, MONITOR_DEFAULTTONEAREST);
+    if (GetWindowRect(targetWindow, &targetRect) && GetMonitorInfoW(monitor, &monitorInfo)) {
+        monitorHandle = reinterpret_cast<quint64>(monitor);
+        captureRect = QRect(targetRect.left - monitorInfo.rcMonitor.left,
+                            targetRect.top - monitorInfo.rcMonitor.top,
+                            targetRect.right - targetRect.left,
+                            targetRect.bottom - targetRect.top);
+    }
+#endif
+    if (captureRect.isEmpty()) {
+        const qreal scale = target->devicePixelRatioF();
+        const QPoint global = target->mapToGlobal(QPoint(0, 0));
+        captureRect = QRect(qRound(global.x() * scale), qRound(global.y() * scale),
+                            qRound(target->width() * scale), qRound(target->height() * scale));
+    }
+    m_recordingSession->updateCaptureRect(monitorHandle, captureRect);
+}
+
+void MainWindow::exportCurrentProject() {
+    if (!m_currentProject) {
+        m_recordingStatus->setText(QStringLiteral("Record or open a project before exporting"));
+        return;
+    }
+    if (m_recordingSession->state() == RecordingState::Recording) {
+        m_recordingStatus->setText(QStringLiteral("Stop recording before export"));
+        return;
+    }
+    saveCurrentProject();
+    QDir().mkpath(m_currentProject->exportsDirectory());
+    const QString format = m_sceneFormat == static_cast<int>(SceneFormat::Vertical)
+        ? QStringLiteral("vertical") : QStringLiteral("wide");
+    const QString output = QDir(m_currentProject->exportsDirectory()).filePath(
+        QStringLiteral("%1-%2.mp4").arg(format,
+            QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"))));
+    m_exportJob->start(*m_currentProject, *m_sceneDocument,
+                       static_cast<SceneFormat>(m_sceneFormat), output);
+}
+
+void MainWindow::saveCurrentProject() {
+    if (m_currentProject && m_sceneDocument) {
+        const QString error = m_projectStore->save(*m_currentProject, *m_sceneDocument);
+        if (!error.isEmpty() && m_recordingStatus) m_recordingStatus->setText(error);
+    }
+}
+
+void MainWindow::loadRecordedPreviews(const ProjectInfo &project) {
+    const QStringList airplay = QDir(project.airplayDirectory()).entryList(
+        {QStringLiteral("video-*.mkv")}, QDir::Files, QDir::Name);
+    const QStringList cameras = QDir(project.presenterDirectory()).entryList(
+        {QStringLiteral("camera-*.mkv")}, QDir::Files, QDir::Name);
+    const QString airplayPath = airplay.isEmpty() ? QString() :
+        QDir(project.airplayDirectory()).filePath(airplay.first());
+    const QString cameraPath = cameras.isEmpty() ? QString() :
+        QDir(project.presenterDirectory()).filePath(cameras.first());
+    if (airplayPath.isEmpty() && cameraPath.isEmpty()) return;
+    const QString projectId = project.id;
+    QThread *thread = QThread::create([this, projectId, airplayPath, cameraPath]() {
+        const QImage airplayFrame = loadVideoPreview(airplayPath);
+        const QImage cameraFrame = loadVideoPreview(cameraPath);
+        QMetaObject::invokeMethod(this, [this, projectId, airplayFrame, cameraFrame]() {
+            if (!m_currentProject || m_currentProject->id != projectId || !m_sceneCanvas || !m_sceneDocument)
+                return;
+            for (const SceneSource &source : m_sceneDocument->sources()) {
+                if (source.type == SceneSourceType::AirPlay && !airplayFrame.isNull())
+                    m_sceneCanvas->setSourcePreview(source.id, airplayFrame);
+                if (source.type == SceneSourceType::Camera && !cameraFrame.isNull())
+                    m_sceneCanvas->setSourcePreview(source.id, cameraFrame);
+            }
+        }, Qt::QueuedConnection);
+    });
+    m_previewThreads.append(thread);
+    connect(thread, &QThread::finished, this, [this, thread]() { m_previewThreads.removeAll(thread); });
+    connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+    thread->start();
+}
+
 
 QWidget *MainWindow::createPlayerPage() {
     m_playerPage = new QWidget(this);
@@ -237,31 +605,59 @@ QWidget *MainWindow::createPlayerPage() {
 
     m_playerChrome = new QWidget(m_playerCard);
     m_playerChrome->setObjectName(QStringLiteral("playerChrome"));
-    auto *titleRow = new QHBoxLayout(m_playerChrome);
-    titleRow->setContentsMargins(0, 0, 0, 0);
-    auto *title = new QLabel(QStringLiteral("Live screen"), m_playerChrome);
-    title->setObjectName(QStringLiteral("cardTitle"));
-    titleRow->addWidget(title);
-    titleRow->addStretch();
+    auto *toolbar = new QHBoxLayout(m_playerChrome);
+    toolbar->setContentsMargins(2, 0, 2, 0);
+    toolbar->setSpacing(7);
+    m_liveModeButton = new QPushButton(QStringLiteral("Live"), m_playerChrome);
+    m_editModeButton = new QPushButton(QStringLiteral("Edit layout"), m_playerChrome);
+    m_wideButton = new QPushButton(QStringLiteral("16:9 Wide"), m_playerChrome);
+    m_verticalButton = new QPushButton(QStringLiteral("9:16 Vertical"), m_playerChrome);
+    for (auto *button : {m_liveModeButton, m_editModeButton, m_wideButton, m_verticalButton}) {
+        button->setObjectName(QStringLiteral("segmentedButton"));
+        button->setCheckable(true);
+        toolbar->addWidget(button);
+    }
+    m_liveModeButton->setChecked(true);
+    m_wideButton->setChecked(true);
+    connect(m_liveModeButton, &QPushButton::clicked, this, [this]() { setStudioMode(false); });
+    connect(m_editModeButton, &QPushButton::clicked, this, [this]() { setStudioMode(true); });
+    connect(m_wideButton, &QPushButton::clicked, this, [this]() { setSceneFormat(false); });
+    connect(m_verticalButton, &QPushButton::clicked, this, [this]() { setSceneFormat(true); });
+    toolbar->addStretch();
     auto *embedded = new QLabel(QStringLiteral("D3D11 · EMBEDDED"), m_playerChrome);
     embedded->setObjectName(QStringLiteral("miniBadge"));
-    titleRow->addWidget(embedded);
+    toolbar->addWidget(embedded);
     m_playerLayout->addWidget(m_playerChrome);
 
-    m_videoSurface = new VideoSurface(m_playerCard);
-    m_playerLayout->addWidget(m_videoSurface, 1);
+    m_previewStack = new QStackedWidget(m_playerCard);
+    m_previewStack->setObjectName(QStringLiteral("previewStack"));
+    m_videoSurface = new VideoSurface(m_previewStack);
+    m_sceneCanvas = new SceneCanvas(m_previewStack);
+    m_sceneCanvas->setDocument(m_sceneDocument.get(), SceneFormat::Wide);
+    m_previewStack->addWidget(m_videoSurface);
+    m_previewStack->addWidget(m_sceneCanvas);
+    m_playerLayout->addWidget(m_previewStack, 1);
 
     m_playerControls = new QWidget(m_playerCard);
     m_playerControls->setObjectName(QStringLiteral("playerControls"));
     auto *controls = new QHBoxLayout(m_playerControls);
     controls->setContentsMargins(0, 0, 0, 0);
-    auto *hint = mutedLabel(QStringLiteral("F11 fullscreen · Esc to return"), m_playerControls);
-    controls->addWidget(hint);
+    controls->setSpacing(7);
+    const QList<QPair<QString, std::function<void()>>> commands {
+        {QStringLiteral("Undo"), [this]() { m_sceneCanvas->undoStack()->undo(); }},
+        {QStringLiteral("Redo"), [this]() { m_sceneCanvas->undoStack()->redo(); }},
+        {QStringLiteral("Fit"), [this]() { m_sceneCanvas->fitSelection(); }},
+        {QStringLiteral("Center"), [this]() { m_sceneCanvas->centerSelection(); }},
+        {QStringLiteral("Reset"), [this]() { m_sceneCanvas->resetSelection(); }}
+    };
+    for (const auto &command : commands) {
+        auto *button = new QPushButton(command.first, m_playerControls);
+        button->setObjectName(QStringLiteral("secondaryButton"));
+        connect(button, &QPushButton::clicked, this, command.second);
+        controls->addWidget(button);
+    }
+    controls->addWidget(mutedLabel(QStringLiteral("Drag · handles resize · Alt+drag crop · Ctrl disables snap"), m_playerControls));
     controls->addStretch();
-    auto *restart = new QPushButton(QStringLiteral("Restart receiver"), m_playerControls);
-    restart->setObjectName(QStringLiteral("secondaryButton"));
-    connect(restart, &QPushButton::clicked, this, &MainWindow::restartReceiver);
-    controls->addWidget(restart);
     m_fullscreenButton = new QPushButton(QStringLiteral("Fullscreen"), m_playerControls);
     m_fullscreenButton->setObjectName(QStringLiteral("fullscreenButton"));
     connect(m_fullscreenButton, &QPushButton::clicked, this, &MainWindow::enterFullscreen);
@@ -270,50 +666,223 @@ QWidget *MainWindow::createPlayerPage() {
     m_playerPageLayout->addWidget(m_playerCard, 1);
 
     m_sessionPanel = card(m_playerPage);
-    m_sessionPanel->setFixedWidth(286);
-    auto *sessionLayout = new QVBoxLayout(m_sessionPanel);
-    sessionLayout->setContentsMargins(22, 22, 22, 22);
-    sessionLayout->setSpacing(9);
-    auto *sessionTitle = new QLabel(QStringLiteral("Session"), m_sessionPanel);
-    sessionTitle->setObjectName(QStringLiteral("cardTitle"));
-    sessionLayout->addWidget(sessionTitle);
+    m_sessionPanel->setObjectName(QStringLiteral("studioDock"));
+    m_sessionPanel->setFixedWidth(316);
+    auto *dock = new QVBoxLayout(m_sessionPanel);
+    dock->setContentsMargins(14, 14, 14, 14);
+    dock->setSpacing(7);
+    auto addSection = [this, dock](const QString &text) {
+        auto *label = new QLabel(text, m_sessionPanel);
+        label->setObjectName(QStringLiteral("dockTitle"));
+        dock->addWidget(label);
+    };
+    addSection(QStringLiteral("SOURCES"));
+    m_sourceList = new QListWidget(m_sessionPanel);
+    m_sourceList->setObjectName(QStringLiteral("sourceList"));
+    m_sourceList->setMaximumHeight(96);
+    dock->addWidget(m_sourceList);
+    auto *sourceRow = new QHBoxLayout;
+    const QList<QPair<QString, int>> additions{{QStringLiteral("Camera"), 1}, {QStringLiteral("Image"), 2},
+                                               {QStringLiteral("Text"), 3}, {QStringLiteral("Color"), 4}};
+    for (const auto &entry : additions) {
+        auto *button = new QPushButton(QStringLiteral("+") + entry.first, m_sessionPanel);
+        button->setObjectName(QStringLiteral("tinyButton"));
+        connect(button, &QPushButton::clicked, this, [this, entry]() { addStudioSource(entry.second); });
+        sourceRow->addWidget(button);
+    }
+    dock->addLayout(sourceRow);
+
+    addSection(QStringLiteral("LAYERS"));
+    m_layerList = new QListWidget(m_sessionPanel);
+    m_layerList->setObjectName(QStringLiteral("layerList"));
+    m_layerList->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_layerList->setDragDropMode(QAbstractItemView::InternalMove);
+    dock->addWidget(m_layerList, 1);
+    auto *layerRow = new QHBoxLayout;
+    auto *up = new QPushButton(QStringLiteral("Up"), m_sessionPanel);
+    auto *down = new QPushButton(QStringLiteral("Down"), m_sessionPanel);
+    auto *lock = new QPushButton(QStringLiteral("Lock"), m_sessionPanel);
+    auto *remove = new QPushButton(QStringLiteral("Remove"), m_sessionPanel);
+    for (auto *button : {up, down, lock, remove}) { button->setObjectName(QStringLiteral("tinyButton")); layerRow->addWidget(button); }
+    dock->addLayout(layerRow);
+    auto *appearanceRow = new QHBoxLayout;
+    auto *opacity = new QComboBox(m_sessionPanel);
+    opacity->setObjectName(QStringLiteral("compactCombo"));
+    opacity->addItem(QStringLiteral("Opacity 100%"), 1.0);
+    opacity->addItem(QStringLiteral("Opacity 75%"), .75);
+    opacity->addItem(QStringLiteral("Opacity 50%"), .5);
+    auto *mask = new QComboBox(m_sessionPanel);
+    mask->setObjectName(QStringLiteral("compactCombo"));
+    mask->addItem(QStringLiteral("No mask"), static_cast<int>(SceneMask::None));
+    mask->addItem(QStringLiteral("Rounded"), static_cast<int>(SceneMask::RoundedRectangle));
+    mask->addItem(QStringLiteral("Circle"), static_cast<int>(SceneMask::Circle));
+    appearanceRow->addWidget(opacity);
+    appearanceRow->addWidget(mask);
+    dock->addLayout(appearanceRow);
+
+    addSection(QStringLiteral("RECORD"));
+    m_recordCamera = new QCheckBox(QStringLiteral("Camera track"), m_sessionPanel);
+    m_recordMicrophone = new QCheckBox(QStringLiteral("Microphone track"), m_sessionPanel);
+    dock->addWidget(m_recordCamera);
+    dock->addWidget(m_recordMicrophone);
+    m_recordingStatus = mutedLabel(QStringLiteral("Ready to record"), m_sessionPanel);
+    dock->addWidget(m_recordingStatus);
+    auto *recordRow = new QHBoxLayout;
+    m_recordButton = new QPushButton(QStringLiteral("Record"), m_sessionPanel);
+    m_recordButton->setObjectName(QStringLiteral("recordButton"));
+    connect(m_recordButton, &QPushButton::clicked, this, &MainWindow::toggleRecording);
+    recordRow->addWidget(m_recordButton, 1);
+    auto *exportButton = new QPushButton(QStringLiteral("Export MP4"), m_sessionPanel);
+    exportButton->setObjectName(QStringLiteral("secondaryButton"));
+    exportButton->setAccessibleName(QStringLiteral("exportButton"));
+    connect(exportButton, &QPushButton::clicked, this, &MainWindow::exportCurrentProject);
+    recordRow->addWidget(exportButton);
+    dock->addLayout(recordRow);
+
     m_sessionState = new QLabel(QStringLiteral("Receiver stopped"), m_sessionPanel);
-    m_sessionState->setObjectName(QStringLiteral("sessionHero"));
-    m_sessionState->setWordWrap(true);
-    sessionLayout->addWidget(m_sessionState);
-    sessionLayout->addSpacing(12);
-
-    sessionLayout->addWidget(mutedLabel(QStringLiteral("DEVICE"), m_sessionPanel));
+    m_sessionState->setObjectName(QStringLiteral("sessionMini"));
     m_deviceName = new QLabel(QStringLiteral("—"), m_sessionPanel);
-    m_deviceName->setObjectName(QStringLiteral("valueLabel"));
-    m_deviceName->setWordWrap(true);
-    sessionLayout->addWidget(m_deviceName);
     m_deviceModel = mutedLabel(QStringLiteral("Waiting for a connection"), m_sessionPanel);
-    sessionLayout->addWidget(m_deviceModel);
-    sessionLayout->addSpacing(8);
-
-    sessionLayout->addWidget(mutedLabel(QStringLiteral("STREAM"), m_sessionPanel));
     m_resolution = new QLabel(QStringLiteral("—"), m_sessionPanel);
-    m_resolution->setObjectName(QStringLiteral("valueLabel"));
-    sessionLayout->addWidget(m_resolution);
     m_duration = mutedLabel(QStringLiteral("00:00"), m_sessionPanel);
-    sessionLayout->addWidget(m_duration);
-    sessionLayout->addSpacing(8);
-
-    sessionLayout->addWidget(mutedLabel(QStringLiteral("NETWORK"), m_sessionPanel));
     m_networkAddress = new QLabel(NetworkDiagnostics::primaryAddress(), m_sessionPanel);
-    m_networkAddress->setObjectName(QStringLiteral("valueLabel"));
-    sessionLayout->addWidget(m_networkAddress);
     m_securitySummary = mutedLabel({}, m_sessionPanel);
-    sessionLayout->addWidget(m_securitySummary);
-    sessionLayout->addStretch();
-
-    auto *openSettings = new QPushButton(QStringLiteral("Open settings"), m_sessionPanel);
-    openSettings->setObjectName(QStringLiteral("secondaryButton"));
-    connect(openSettings, &QPushButton::clicked, this, [this]() { selectPage(2); });
-    sessionLayout->addWidget(openSettings);
+    auto *streamRow = new QHBoxLayout;
+    streamRow->addWidget(m_sessionState, 1);
+    streamRow->addWidget(m_duration);
+    dock->addLayout(streamRow);
+    dock->addWidget(m_deviceName);
+    dock->addWidget(m_resolution);
+    dock->addWidget(m_networkAddress);
+    dock->addWidget(m_deviceModel);
+    dock->addWidget(m_securitySummary);
     m_playerPageLayout->addWidget(m_sessionPanel);
+
+    connect(m_layerList, &QListWidget::itemSelectionChanged, this, [this]() {
+        m_sceneCanvas->clearLayerSelection();
+        for (QListWidgetItem *item : m_layerList->selectedItems())
+            m_sceneCanvas->selectLayer(item->data(Qt::UserRole).toString(), true);
+    });
+    connect(m_layerList, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
+        const QString id = item->data(Qt::UserRole).toString();
+        if (!id.isEmpty()) m_sceneDocument->setLayerVisible(static_cast<SceneFormat>(m_sceneFormat), id,
+                                                             item->checkState() == Qt::Checked);
+        m_sceneCanvas->refreshFromDocument();
+        saveCurrentProject();
+    });
+    connect(m_layerList->model(), &QAbstractItemModel::rowsMoved, this, [this]() {
+        const SceneFormat format = static_cast<SceneFormat>(m_sceneFormat);
+        for (int row = m_layerList->count() - 1, index = 0; row >= 0; --row, ++index)
+            m_sceneDocument->moveLayer(format, m_layerList->item(row)->data(Qt::UserRole).toString(), index);
+        m_sceneCanvas->setDocument(m_sceneDocument.get(), format);
+        saveCurrentProject();
+    });
+    connect(m_sceneCanvas, &SceneCanvas::layerSelectionChanged, this, [this](const QStringList &ids) {
+        QSignalBlocker blocker(m_layerList);
+        for (int i = 0; i < m_layerList->count(); ++i)
+            m_layerList->item(i)->setSelected(ids.contains(m_layerList->item(i)->data(Qt::UserRole).toString()));
+    });
+    connect(m_sceneCanvas, &SceneCanvas::sceneChanged, this, &MainWindow::saveCurrentProject);
+    connect(opacity, &QComboBox::currentIndexChanged, this, [this, opacity](int) {
+        m_sceneCanvas->setSelectionOpacity(opacity->currentData().toDouble());
+    });
+    connect(mask, &QComboBox::currentIndexChanged, this, [this, mask](int) {
+        m_sceneCanvas->setSelectionMask(static_cast<SceneMask>(mask->currentData().toInt()));
+    });
+
+    auto moveCurrent = [this](int delta) {
+        if (auto *item = m_layerList->currentItem()) {
+            const QString id = item->data(Qt::UserRole).toString();
+            const auto &layers = m_sceneDocument->composition(static_cast<SceneFormat>(m_sceneFormat)).layers;
+            for (int i = 0; i < layers.size(); ++i) if (layers.at(i).id == id)
+                m_sceneDocument->moveLayer(static_cast<SceneFormat>(m_sceneFormat), id, qBound(0, i + delta, layers.size() - 1));
+            m_sceneCanvas->setDocument(m_sceneDocument.get(), static_cast<SceneFormat>(m_sceneFormat));
+            refreshLayerList(); saveCurrentProject();
+        }
+    };
+    connect(up, &QPushButton::clicked, this, [moveCurrent]() { moveCurrent(1); });
+    connect(down, &QPushButton::clicked, this, [moveCurrent]() { moveCurrent(-1); });
+    connect(lock, &QPushButton::clicked, this, [this]() {
+        if (auto *item = m_layerList->currentItem()) {
+            const QString id = item->data(Qt::UserRole).toString();
+            if (const SceneLayer *layer = m_sceneDocument->layer(static_cast<SceneFormat>(m_sceneFormat), id))
+                m_sceneDocument->setLayerLocked(static_cast<SceneFormat>(m_sceneFormat), id, !layer->locked);
+            m_sceneCanvas->setDocument(m_sceneDocument.get(), static_cast<SceneFormat>(m_sceneFormat));
+            refreshLayerList(); saveCurrentProject();
+        }
+    });
+    connect(remove, &QPushButton::clicked, this, [this]() {
+        if (auto *item = m_layerList->currentItem()) {
+            m_sceneDocument->removeLayer(static_cast<SceneFormat>(m_sceneFormat), item->data(Qt::UserRole).toString());
+            m_sceneCanvas->setDocument(m_sceneDocument.get(), static_cast<SceneFormat>(m_sceneFormat));
+            refreshLayerList(); saveCurrentProject();
+        }
+    });
+    refreshLayerList();
     return m_playerPage;
+}
+
+QWidget *MainWindow::createProjectsPage() {
+    auto *page = new QWidget(this);
+    page->setObjectName(QStringLiteral("page"));
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(30, 24, 30, 30);
+    layout->setSpacing(14);
+    auto *intro = mutedLabel(QStringLiteral(
+        "Recordings stay local and editable. Interrupted sessions are marked Recoverable; finalized segments are never discarded."), page);
+    layout->addWidget(intro);
+    auto *projectCard = card(page);
+    auto *projectLayout = new QVBoxLayout(projectCard);
+    projectLayout->setContentsMargins(18, 18, 18, 18);
+    auto *row = new QHBoxLayout;
+    auto *title = new QLabel(QStringLiteral("Local projects"), projectCard);
+    title->setObjectName(QStringLiteral("cardTitle"));
+    row->addWidget(title);
+    row->addStretch();
+    auto *openFolder = new QPushButton(QStringLiteral("Open recordings folder"), projectCard);
+    openFolder->setObjectName(QStringLiteral("secondaryButton"));
+    connect(openFolder, &QPushButton::clicked, this, [this]() {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(m_projectStore->rootDirectory()));
+    });
+    row->addWidget(openFolder);
+    projectLayout->addLayout(row);
+    m_projectList = new QListWidget(projectCard);
+    m_projectList->setObjectName(QStringLiteral("projectList"));
+    projectLayout->addWidget(m_projectList, 1);
+    auto *actions = new QHBoxLayout;
+    auto *open = new QPushButton(QStringLiteral("Open in Studio"), projectCard);
+    open->setObjectName(QStringLiteral("primaryButton"));
+    open->setAccessibleName(QStringLiteral("openProjectButton"));
+    connect(open, &QPushButton::clicked, this, [this]() {
+        auto *item = m_projectList ? m_projectList->currentItem() : nullptr;
+        if (!item) return;
+        auto loaded = m_projectStore->load(item->data(Qt::UserRole).toString());
+        if (!loaded.ok()) return;
+        m_sceneDocument = std::move(loaded.document);
+        m_currentProject = std::make_unique<ProjectInfo>(loaded.project);
+        m_sceneCanvas->setDocument(m_sceneDocument.get(), static_cast<SceneFormat>(m_sceneFormat));
+        refreshLayerList();
+        loadRecordedPreviews(*m_currentProject);
+        selectPage(0);
+        setStudioMode(true);
+    });
+    actions->addWidget(open);
+    auto *recover = new QPushButton(QStringLiteral("Recover session"), projectCard);
+    recover->setObjectName(QStringLiteral("secondaryButton"));
+    recover->setAccessibleName(QStringLiteral("recoverProjectButton"));
+    connect(recover, &QPushButton::clicked, this, [this, open]() {
+        auto *item = m_projectList ? m_projectList->currentItem() : nullptr;
+        if (!item) return;
+        m_projectStore->setState(item->data(Qt::UserRole).toString(), ProjectState::Ready);
+        refreshProjectList();
+        open->click();
+    });
+    actions->addWidget(recover);
+    actions->addStretch();
+    projectLayout->addLayout(actions);
+    layout->addWidget(projectCard, 1);
+    refreshProjectList();
+    return page;
 }
 
 QWidget *MainWindow::createActivityPage() {
@@ -803,6 +1372,7 @@ void MainWindow::setAutostart(bool enabled) {
 void MainWindow::enterFullscreen() {
     if (m_fullscreen) return;
     selectPage(0);
+    setStudioMode(false);
 
     m_geometryBeforeFullscreen = saveGeometry();
     m_windowStateBeforeFullscreen = windowState() & ~Qt::WindowFullScreen;
@@ -914,4 +1484,14 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
         return;
     }
     QMainWindow::keyPressEvent(event);
+}
+
+void MainWindow::moveEvent(QMoveEvent *event) {
+    QMainWindow::moveEvent(event);
+    QTimer::singleShot(0, this, &MainWindow::refreshRecordingCapture);
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event) {
+    QMainWindow::resizeEvent(event);
+    QTimer::singleShot(0, this, &MainWindow::refreshRecordingCapture);
 }

@@ -28,6 +28,8 @@
 #include <ctype.h>
 #include <string>
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <vector>
 #include <fstream>
 #include <sstream>
@@ -70,6 +72,7 @@
 #include "renderers/video_renderer.h"
 #include "renderers/audio_renderer.h"
 #include "renderers/mux_renderer.h"
+#include <gst/video/video.h>
 #ifdef DBUS
 #include <dbus/dbus.h>
 #endif
@@ -206,10 +209,16 @@ static std::string ble_filename = "";
 static std::string rtp_pipeline = "";
 static std::string audio_rtp_pipeline = "";
 static GMainLoop *gmainloop = NULL;
-static bool mux_to_file = false;
+static std::atomic_bool mux_to_file(false);
+static std::atomic_bool current_video_is_h265(false);
+static std::mutex mux_recording_mutex;
 static std::string mux_filename = "recording";
 static uxplay_event_callback host_event_callback = NULL;
 static void *host_event_context = NULL;
+static bool recording_test_mode = false;
+static bool recording_test_stop_clean = true;
+static uxplay_preview_callback host_preview_callback = NULL;
+static void *host_preview_context = NULL;
 
 static void emit_host_event(uxplay_event_type type,
                             const char *device_name = NULL,
@@ -235,6 +244,68 @@ extern "C" void uxplay_set_event_callback(uxplay_event_callback callback,
                                             void *context) {
     host_event_callback = callback;
     host_event_context = context;
+}
+
+static void forward_preview_sample(GstSample *sample, void *context) {
+    (void) context;
+    if (!host_preview_callback || !sample) return;
+    GstCaps *caps = gst_sample_get_caps(sample);
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
+    GstVideoInfo info;
+    GstMapInfo map;
+    if (!caps || !buffer || !gst_video_info_from_caps(&info, caps) ||
+        !gst_buffer_map(buffer, &map, GST_MAP_READ)) return;
+    host_preview_callback(map.data, GST_VIDEO_INFO_WIDTH(&info), GST_VIDEO_INFO_HEIGHT(&info),
+                          GST_VIDEO_INFO_PLANE_STRIDE(&info, 0), host_preview_context);
+    gst_buffer_unmap(buffer, &map);
+}
+
+extern "C" void uxplay_set_preview_callback(uxplay_preview_callback callback, void *context) {
+    host_preview_callback = callback;
+    host_preview_context = context;
+    video_renderer_set_preview_sample_callback(callback ? forward_preview_sample : NULL, NULL);
+}
+
+extern "C" int uxplay_start_recording(const char *directory) {
+    std::lock_guard<std::mutex> lock(mux_recording_mutex);
+    if (!directory || !*directory || (!render_logger && !recording_test_mode) || mux_to_file) return 0;
+    std::string prefix(directory);
+    const char last = prefix.empty() ? '\0' : prefix.back();
+    if (last != '/' && last != '\\') prefix += '/';
+    prefix += "video";
+    mux_filename = prefix;
+    if (!recording_test_mode) {
+        mux_renderer_init(render_logger, mux_filename.c_str(), false, true);
+        if (!mux_renderer_choose_video_codec(current_video_is_h265)) {
+            mux_renderer_destroy();
+            return 0;
+        }
+    }
+    mux_to_file = true;
+    return 1;
+}
+
+extern "C" int uxplay_stop_recording() {
+    {
+        std::lock_guard<std::mutex> lock(mux_recording_mutex);
+        if (!mux_to_file) return 1;
+        mux_to_file = false;
+    }
+    bool clean = true;
+    if (!recording_test_mode) {
+        clean = mux_renderer_stop();
+        mux_renderer_destroy();
+    }
+    if (recording_test_mode) clean = recording_test_stop_clean;
+    return clean ? 1 : 0;
+}
+
+extern "C" void uxplay_set_recording_test_mode(int enabled) {
+    recording_test_mode = enabled != 0;
+}
+
+extern "C" void uxplay_set_recording_test_stop_result(int clean) {
+    recording_test_stop_clean = clean != 0;
 }
 
 //Support for D-Bus-based screensaver inhibition (org.freedesktop.ScreenSaver) 
@@ -2220,6 +2291,9 @@ extern "C" void video_reset(void *cls, reset_type_t type) {
 
 extern "C" int video_set_codec(void *cls, video_codec_t codec) {
     bool video_is_h265 = (codec == VIDEO_CODEC_H265);
+    current_video_is_h265 = video_is_h265;
+    mux_renderer_reset_video_cache();
+    std::lock_guard<std::mutex> lock(mux_recording_mutex);
     if (mux_to_file) {
         mux_renderer_choose_video_codec(video_is_h265);
     }
@@ -2285,7 +2359,8 @@ extern "C" void conn_destroy (void *cls) {
             remove (dacpfile.c_str());
         }
         if (mux_to_file) {
-            mux_renderer_stop();
+            std::lock_guard<std::mutex> lock(mux_recording_mutex);
+            if (mux_to_file) mux_renderer_stop();
         }
     }
 }
@@ -2347,7 +2422,8 @@ extern "C" void audio_process (void *cls, raop_ntp_t *ntp, audio_decode_struct *
         dump_audio_to_file(data->data, data->data_len, (data->data)[0] & 0xf0);
     }
     if (mux_to_file) {
-        mux_renderer_push_audio(data->data, data->data_len, data->ntp_time_remote);
+        std::lock_guard<std::mutex> lock(mux_recording_mutex);
+        if (mux_to_file) mux_renderer_push_audio(data->data, data->data_len, data->ntp_time_remote);
     }
     if (use_audio) {
         if (!remote_clock_offset) {
@@ -2381,8 +2457,12 @@ extern "C" void video_process (void *cls, raop_ntp_t *ntp, video_decode_struct *
     if (dump_video) {
         dump_video_to_file(data->data, data->data_len);
     }
+    if (data->nal_count > 1) {
+        mux_renderer_cache_video(data->data, data->data_len, current_video_is_h265);
+    }
     if (mux_to_file) {
-        mux_renderer_push_video(data->data, data->data_len, data->ntp_time_remote);
+        std::lock_guard<std::mutex> lock(mux_recording_mutex);
+        if (mux_to_file) mux_renderer_push_video(data->data, data->data_len, data->ntp_time_remote);
     }
     if (use_video) {
         if (!remote_clock_offset) {
@@ -2511,7 +2591,8 @@ extern "C" void audio_get_format (void *cls, unsigned char *ct, unsigned short *
     }
 
     if (mux_to_file) {
-        mux_renderer_choose_audio_codec(*ct);
+        std::lock_guard<std::mutex> lock(mux_recording_mutex);
+        if (mux_to_file) mux_renderer_choose_audio_codec(*ct);
     }
 
     if (coverart_filename.length()) {
@@ -3348,7 +3429,8 @@ int start_uxplay (int argc, char *argv[]) {
             raop_set_port(raop, port);
         }
         if (mux_to_file) {
-            mux_renderer_stop();
+            std::lock_guard<std::mutex> lock(mux_recording_mutex);
+            if (mux_to_file) mux_renderer_stop();
         }
         goto reconnect;
     } else {
