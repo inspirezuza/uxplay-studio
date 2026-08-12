@@ -15,10 +15,15 @@ public:
         return !failed.contains(name);
     }
     bool stopAll(int, QString *) override { stopped = true; return true; }
+    bool updateVideoCapture(const QRect &captureRect, QString *) override {
+        updatedRect = captureRect;
+        return true;
+    }
     QStringList names;
     QStringList pipelines;
     QStringList failed;
     bool stopped = false;
+    QRect updatedRect;
 };
 
 class RecordingSessionTest final : public QObject {
@@ -60,6 +65,8 @@ private slots:
         }
         QVERIFY(QFile::exists(QDir(created.project.directory).filePath("session.json")));
         QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Recording);
+        QVERIFY(session.updateCaptureRect(0, QRect(20, 30, 960, 540)));
+        QCOMPARE(runner.updatedRect, QRect(20, 30, 960, 540));
 
         QVERIFY(session.stop());
         QVERIFY(runner.stopped);

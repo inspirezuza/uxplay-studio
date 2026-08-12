@@ -11,6 +11,7 @@ public:
     virtual ~PipelineRunner() = default;
     virtual bool startTrack(const QString &name, const QString &pipeline, QString *error) = 0;
     virtual bool stopAll(int timeoutMs, QString *error) = 0;
+    virtual bool updateVideoCapture(const QRect &captureRect, QString *error) = 0;
 };
 
 enum class RecordingState { Idle, Starting, Recording, Finalizing, Failed };
@@ -32,6 +33,7 @@ public:
 
     bool start(const ProjectInfo &project, const RecordingOptions &options);
     bool stop();
+    bool updateCaptureRect(quint64 monitorHandle, const QRect &captureRect);
     RecordingState state() const;
     QString lastError() const;
     QStringList warnings() const;
@@ -54,4 +56,5 @@ private:
     RecordingState m_state = RecordingState::Idle;
     QString m_lastError;
     QStringList m_warnings;
+    quint64 m_captureMonitorHandle = 0;
 };

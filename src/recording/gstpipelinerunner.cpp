@@ -83,3 +83,23 @@ bool GstPipelineRunner::stopAll(int timeoutMs, QString *error) {
     m_tracks.clear();
     return clean;
 }
+
+bool GstPipelineRunner::updateVideoCapture(const QRect &captureRect, QString *error) {
+    for (const Track &track : m_tracks) {
+        if (track.name != QStringLiteral("airplay-video")) continue;
+        GstElement *source = gst_bin_get_by_name(GST_BIN(track.pipeline), "studio-capture");
+        if (!source) {
+            if (error) *error = QStringLiteral("The AirPlay capture source is unavailable");
+            return false;
+        }
+        g_object_set(source,
+                     "crop-x", static_cast<guint>(qMax(0, captureRect.x())),
+                     "crop-y", static_cast<guint>(qMax(0, captureRect.y())),
+                     "crop-width", static_cast<guint>(captureRect.width()),
+                     "crop-height", static_cast<guint>(captureRect.height()), nullptr);
+        gst_object_unref(source);
+        return true;
+    }
+    if (error) *error = QStringLiteral("The AirPlay video track is not running");
+    return false;
+}

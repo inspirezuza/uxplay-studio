@@ -1,6 +1,7 @@
 #include "exportpipeline.h"
 
 #include <QDir>
+#include <QColor>
 #include <QFileInfo>
 #include <QUrl>
 #include <QtMath>
@@ -24,7 +25,8 @@ bool hasTrack(const QString &directory, const QString &prefix, const QString &su
 ExportPipelineResult ExportPipeline::build(const ProjectInfo &project,
                                            const SceneDocument &scene,
                                            SceneFormat format,
-                                           const QString &outputPath) {
+                                           const QString &outputPath,
+                                           qint64 durationNanoseconds) {
     const SceneComposition &composition = scene.composition(format);
     if (composition.layers.isEmpty()) return {{}, QStringLiteral("The scene has no layers")};
     QStringList inputs;
@@ -35,6 +37,15 @@ ExportPipelineResult ExportPipeline::build(const ProjectInfo &project,
         if (!source) continue;
         const QRectF frame = layer.transform.frame;
         QString sourcePipeline;
+        const bool isStatic = source->type == SceneSourceType::Image ||
+                              source->type == SceneSourceType::Color ||
+                              source->type == SceneSourceType::Text;
+        const qint64 staticFrames = durationNanoseconds > 0
+            ? qMax<qint64>(1, durationNanoseconds * 60 / 1'000'000'000)
+            : 0;
+        if (isStatic && staticFrames == 0) {
+            return {{}, QStringLiteral("The recording timeline duration is unavailable")};
+        }
         if (source->type == SceneSourceType::AirPlay &&
             hasTrack(project.airplayDirectory(), QStringLiteral("video"), QStringLiteral("mkv"))) {
             sourcePipeline = QStringLiteral("splitmuxsrc location=%1 ! decodebin")
@@ -44,13 +55,22 @@ ExportPipelineResult ExportPipeline::build(const ProjectInfo &project,
             sourcePipeline = QStringLiteral("splitmuxsrc location=%1 ! decodebin")
                 .arg(quote(firstPattern(project.presenterDirectory(), "camera", "mkv")));
         } else if (source->type == SceneSourceType::Image && QFileInfo::exists(source->uri)) {
-            sourcePipeline = QStringLiteral("filesrc location=%1 ! decodebin ! imagefreeze")
-                .arg(quote(source->uri));
+            sourcePipeline = QStringLiteral(
+                "filesrc location=%1 ! decodebin ! imagefreeze num-buffers=%2 "
+                "! video/x-raw,framerate=60/1")
+                .arg(quote(source->uri)).arg(staticFrames);
         } else if (source->type == SceneSourceType::Color) {
-            sourcePipeline = QStringLiteral("videotestsrc pattern=solid-color is-live=false");
+            const QColor color(QColor::isValidColorName(source->uri) ? source->uri : QStringLiteral("#24345c"));
+            sourcePipeline = QStringLiteral(
+                "videotestsrc pattern=solid-color foreground-color=%1 is-live=false num-buffers=%2 "
+                "! video/x-raw,framerate=60/1")
+                .arg(color.rgba()).arg(staticFrames);
         } else if (source->type == SceneSourceType::Text) {
-            sourcePipeline = QStringLiteral("videotestsrc pattern=black is-live=false ! textoverlay text=%1 valignment=center halignment=center")
-                .arg(quote(source->name));
+            sourcePipeline = QStringLiteral(
+                "videotestsrc pattern=black is-live=false num-buffers=%1 "
+                "! video/x-raw,framerate=60/1 ! textoverlay text=%2 "
+                "valignment=center halignment=center")
+                .arg(staticFrames).arg(quote(source->name));
         } else {
             continue;
         }

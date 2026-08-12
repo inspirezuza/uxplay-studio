@@ -555,13 +555,25 @@ function Ensure-Wix {
 function Build-Artifacts {
     New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
     $zip = Join-Path $artifactDir "uxplay-studio-$Architecture-portable.zip"
-    if (Test-Path -LiteralPath $zip) {
-        Remove-Item -LiteralPath $zip -Force
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (Test-Path -LiteralPath $zip) {
+            Remove-Item -LiteralPath $zip -Force
+        }
+        try {
+            Compress-Archive `
+                -Path (Join-Path $stageDir "*") `
+                -DestinationPath $zip `
+                -CompressionLevel Optimal `
+                -ErrorAction Stop
+            break
+        }
+        catch {
+            if ($attempt -eq 3) { throw }
+            Start-Sleep -Seconds 1
+        }
     }
-    Compress-Archive `
-        -Path (Join-Path $stageDir "*") `
-        -DestinationPath $zip `
-        -CompressionLevel Optimal
+    $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$zipHash  $([IO.Path]::GetFileName($zip))" | Set-Content -LiteralPath "$zip.sha256" -Encoding ascii
 
     if (-not $SkipInstaller) {
         Ensure-Wix
@@ -589,6 +601,8 @@ function Build-Artifacts {
                 $msi,
                 "-acceptEula", "wix7"
             )
+        $msiHash = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$msiHash  $([IO.Path]::GetFileName($msi))" | Set-Content -LiteralPath "$msi.sha256" -Encoding ascii
     }
 }
 

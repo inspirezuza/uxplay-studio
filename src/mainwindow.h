@@ -14,6 +14,8 @@ class QCheckBox;
 class QComboBox;
 class QCloseEvent;
 class QKeyEvent;
+class QMoveEvent;
+class QResizeEvent;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -41,12 +43,15 @@ class MainWindow final : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget *parent = nullptr, bool autoStart = true);
+    explicit MainWindow(QWidget *parent = nullptr, bool autoStart = true,
+                        const QString &projectRootOverride = {});
     ~MainWindow() override;
 
 protected:
     void closeEvent(QCloseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void moveEvent(QMoveEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     void setupUi();
@@ -66,6 +71,7 @@ private:
     void toggleRecording();
     void exportCurrentProject();
     void saveCurrentProject();
+    void refreshRecordingCapture();
 
     void startReceiver();
     void stopReceiver();

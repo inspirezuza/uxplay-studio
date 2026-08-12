@@ -89,6 +89,11 @@ ProjectLoadResult ProjectStore::load(const QString &directory) const {
 
 QString ProjectStore::save(const ProjectInfo &project, const SceneDocument &document) const {
     ProjectInfo updated = project;
+    const ProjectLoadResult current = load(project.directory);
+    if (current.ok()) {
+        updated.state = current.project.state;
+        updated.createdAtUtc = current.project.createdAtUtc;
+    }
     updated.title = document.title();
     updated.updatedAtUtc = QDateTime::currentDateTimeUtc();
     return writeManifest(updated, document);

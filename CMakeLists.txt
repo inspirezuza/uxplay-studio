@@ -146,7 +146,7 @@ add_executable(test-exportpipeline
     src/projects/projectstore.cpp
     src/studio/scenedocument.cpp
 )
-target_link_libraries(test-exportpipeline PRIVATE Qt6::Core Qt6::Test uxplay)
+target_link_libraries(test-exportpipeline PRIVATE Qt6::Core Qt6::Gui Qt6::Test uxplay)
 target_include_directories(test-exportpipeline PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME exportpipeline COMMAND test-exportpipeline)
 
@@ -157,6 +157,6 @@ add_executable(test-exportjob
     src/projects/projectstore.cpp
     src/studio/scenedocument.cpp
 )
-target_link_libraries(test-exportjob PRIVATE Qt6::Core Qt6::Test uxplay PkgConfig::CAIRO)
+target_link_libraries(test-exportjob PRIVATE Qt6::Core Qt6::Gui Qt6::Test uxplay PkgConfig::CAIRO)
 target_include_directories(test-exportjob PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME exportjob COMMAND test-exportjob)

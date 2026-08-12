@@ -42,8 +42,10 @@ private slots:
         scene.setTitle(QStringLiteral("Export smoke test"));
         const QString airplay = scene.addSource(SceneSourceType::AirPlay, QStringLiteral("iPad"));
         const QString camera = scene.addSource(SceneSourceType::Camera, QStringLiteral("Presenter"));
+        const QString title = scene.addSource(SceneSourceType::Text, QStringLiteral("Lecture title"));
         scene.addLayer(SceneFormat::Wide, airplay);
         const QString cameraLayer = scene.addLayer(SceneFormat::Wide, camera);
+        scene.addLayer(SceneFormat::Wide, title);
         SceneTransform transform = scene.layer(SceneFormat::Wide, cameraLayer)->transform;
         transform.frame = QRectF(1400, 700, 360, 300);
         transform.crop = QMarginsF(.05, .05, .05, .05);

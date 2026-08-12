@@ -36,11 +36,13 @@
 #include <QInputDialog>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMoveEvent>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSettings>
@@ -97,7 +99,7 @@ QString formatDuration(qint64 seconds) {
 }
 }
 
-MainWindow::MainWindow(QWidget *parent, bool autoStart)
+MainWindow::MainWindow(QWidget *parent, bool autoStart, const QString &projectRootOverride)
     : QMainWindow(parent), m_autoStart(autoStart) {
     m_config = SettingsStore::load();
     m_config.autostart = autostartEnabled();
@@ -109,7 +111,8 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart)
                                                         QStringLiteral("iPad screen"));
     m_sceneDocument->addLayer(SceneFormat::Wide, airplay);
     m_sceneDocument->addLayer(SceneFormat::Vertical, airplay);
-    QString projectRoot = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    QString projectRoot = projectRootOverride;
+    if (projectRoot.isEmpty()) projectRoot = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
     if (projectRoot.isEmpty()) projectRoot = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     projectRoot = QDir(projectRoot).filePath(QStringLiteral("UxPlay Studio"));
     m_projectStore = std::make_unique<ProjectStore>(projectRoot);
@@ -438,6 +441,36 @@ void MainWindow::toggleRecording() {
         m_recordingStatus->setText(m_recordingSession->lastError());
 }
 
+void MainWindow::refreshRecordingCapture() {
+    if (!m_recordingSession || m_recordingSession->state() != RecordingState::Recording || !m_videoSurface)
+        return;
+    QWidget *target = m_videoSurface->findChild<QWidget *>(QStringLiteral("nativeVideoTarget"));
+    if (!target) target = m_videoSurface;
+    quint64 monitorHandle = 0;
+    QRect captureRect;
+#ifdef Q_OS_WIN
+    const HWND targetWindow = reinterpret_cast<HWND>(target->winId());
+    RECT targetRect{};
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    const HMONITOR monitor = MonitorFromWindow(targetWindow, MONITOR_DEFAULTTONEAREST);
+    if (GetWindowRect(targetWindow, &targetRect) && GetMonitorInfoW(monitor, &monitorInfo)) {
+        monitorHandle = reinterpret_cast<quint64>(monitor);
+        captureRect = QRect(targetRect.left - monitorInfo.rcMonitor.left,
+                            targetRect.top - monitorInfo.rcMonitor.top,
+                            targetRect.right - targetRect.left,
+                            targetRect.bottom - targetRect.top);
+    }
+#endif
+    if (captureRect.isEmpty()) {
+        const qreal scale = target->devicePixelRatioF();
+        const QPoint global = target->mapToGlobal(QPoint(0, 0));
+        captureRect = QRect(qRound(global.x() * scale), qRound(global.y() * scale),
+                            qRound(target->width() * scale), qRound(target->height() * scale));
+    }
+    m_recordingSession->updateCaptureRect(monitorHandle, captureRect);
+}
+
 void MainWindow::exportCurrentProject() {
     if (!m_currentProject) {
         m_recordingStatus->setText(QStringLiteral("Record or open a project before exporting"));
@@ -459,8 +492,10 @@ void MainWindow::exportCurrentProject() {
 }
 
 void MainWindow::saveCurrentProject() {
-    if (m_currentProject && m_sceneDocument)
-        m_projectStore->save(*m_currentProject, *m_sceneDocument);
+    if (m_currentProject && m_sceneDocument) {
+        const QString error = m_projectStore->save(*m_currentProject, *m_sceneDocument);
+        if (!error.isEmpty() && m_recordingStatus) m_recordingStatus->setText(error);
+    }
 }
 
 
@@ -610,6 +645,7 @@ QWidget *MainWindow::createPlayerPage() {
     recordRow->addWidget(m_recordButton, 1);
     auto *exportButton = new QPushButton(QStringLiteral("Export MP4"), m_sessionPanel);
     exportButton->setObjectName(QStringLiteral("secondaryButton"));
+    exportButton->setAccessibleName(QStringLiteral("exportButton"));
     connect(exportButton, &QPushButton::clicked, this, &MainWindow::exportCurrentProject);
     recordRow->addWidget(exportButton);
     dock->addLayout(recordRow);
@@ -727,6 +763,7 @@ QWidget *MainWindow::createProjectsPage() {
     auto *actions = new QHBoxLayout;
     auto *open = new QPushButton(QStringLiteral("Open in Studio"), projectCard);
     open->setObjectName(QStringLiteral("primaryButton"));
+    open->setAccessibleName(QStringLiteral("openProjectButton"));
     connect(open, &QPushButton::clicked, this, [this]() {
         auto *item = m_projectList ? m_projectList->currentItem() : nullptr;
         if (!item) return;
@@ -742,6 +779,7 @@ QWidget *MainWindow::createProjectsPage() {
     actions->addWidget(open);
     auto *recover = new QPushButton(QStringLiteral("Recover session"), projectCard);
     recover->setObjectName(QStringLiteral("secondaryButton"));
+    recover->setAccessibleName(QStringLiteral("recoverProjectButton"));
     connect(recover, &QPushButton::clicked, this, [this, open]() {
         auto *item = m_projectList ? m_projectList->currentItem() : nullptr;
         if (!item) return;
@@ -1356,4 +1394,14 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
         return;
     }
     QMainWindow::keyPressEvent(event);
+}
+
+void MainWindow::moveEvent(QMoveEvent *event) {
+    QMainWindow::moveEvent(event);
+    QTimer::singleShot(0, this, &MainWindow::refreshRecordingCapture);
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event) {
+    QMainWindow::resizeEvent(event);
+    QTimer::singleShot(0, this, &MainWindow::refreshRecordingCapture);
 }

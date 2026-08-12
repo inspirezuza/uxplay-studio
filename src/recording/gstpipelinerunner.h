@@ -13,6 +13,7 @@ public:
     ~GstPipelineRunner() override;
     bool startTrack(const QString &name, const QString &pipeline, QString *error) override;
     bool stopAll(int timeoutMs, QString *error) override;
+    bool updateVideoCapture(const QRect &captureRect, QString *error) override;
 
 private:
     struct Track { QString name; GstElement *pipeline = nullptr; };

@@ -69,4 +69,3 @@ private:
 };
 
 QString projectStateKey(ProjectState state);
-

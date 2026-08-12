@@ -11,5 +11,6 @@ struct ExportPipelineResult {
 class ExportPipeline final {
 public:
     static ExportPipelineResult build(const ProjectInfo &project, const SceneDocument &scene,
-                                      SceneFormat format, const QString &outputPath);
+                                      SceneFormat format, const QString &outputPath,
+                                      qint64 durationNanoseconds = 0);
 };

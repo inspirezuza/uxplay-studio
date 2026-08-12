@@ -95,21 +95,25 @@ public:
         QColor fill = sourceColor(m_source.type);
         if (m_source.type == SceneSourceType::Color && QColor::isValidColorName(m_source.uri))
             fill = QColor(m_source.uri);
+        if (m_source.type == SceneSourceType::Text) fill = Qt::black;
         painter->fillRect(visible, fill);
         if (m_source.type == SceneSourceType::Image) {
             const QImage image(m_source.uri);
             if (!image.isNull()) painter->drawImage(visible, image);
         }
-        QLinearGradient gradient(visible.topLeft(), visible.bottomRight());
-        gradient.setColorAt(0, QColor(255, 255, 255, 28));
-        gradient.setColorAt(1, QColor(0, 0, 0, 38));
-        painter->fillRect(visible, gradient);
+        if (m_source.type == SceneSourceType::AirPlay || m_source.type == SceneSourceType::Camera) {
+            QLinearGradient gradient(visible.topLeft(), visible.bottomRight());
+            gradient.setColorAt(0, QColor(255, 255, 255, 28));
+            gradient.setColorAt(1, QColor(0, 0, 0, 38));
+            painter->fillRect(visible, gradient);
+        }
         painter->setPen(QColor(QStringLiteral("#f4f7ff")));
         QFont font = painter->font();
         font.setPixelSize(qBound(16, static_cast<int>(content.height() / 12), 44));
         font.setWeight(QFont::DemiBold);
         painter->setFont(font);
-        if (m_source.type != SceneSourceType::Image)
+        if (m_source.type == SceneSourceType::AirPlay || m_source.type == SceneSourceType::Camera ||
+            m_source.type == SceneSourceType::Text)
             painter->drawText(visible.adjusted(18, 18, -18, -18),
                               Qt::AlignCenter | Qt::TextWordWrap, m_source.name);
         painter->restore();

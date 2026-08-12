@@ -48,6 +48,24 @@ private slots:
         if (error) g_error_free(error);
         if (pipeline) gst_object_unref(pipeline);
     }
+
+    void boundsStaticSourcesAtTheTimelineDuration() {
+        QTemporaryDir temp;
+        SceneDocument scene;
+        const QString color = scene.addSource(SceneSourceType::Color, QStringLiteral("Backdrop"),
+                                              QStringLiteral("#123456"));
+        scene.addLayer(SceneFormat::Wide, color);
+        ProjectInfo project;
+        project.directory = temp.path();
+
+        const auto built = ExportPipeline::build(project, scene, SceneFormat::Wide,
+                                                  temp.path() + QStringLiteral("/static.mp4"),
+                                                  2'000'000'000);
+        QVERIFY2(built.ok(), qPrintable(built.error));
+        QVERIFY(built.description.contains(QStringLiteral("foreground-color=4279383126")));
+        QVERIFY(built.description.contains(QStringLiteral("num-buffers=120")));
+        QVERIFY(built.description.contains(QStringLiteral("framerate=60/1")));
+    }
 };
 
 QTEST_APPLESS_MAIN(ExportPipelineTest)

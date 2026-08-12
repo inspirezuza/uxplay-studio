@@ -55,6 +55,22 @@ private slots:
         QCOMPARE(recoverable.first().state, ProjectState::Recoverable);
         QVERIFY(QFile::exists(fragment.fileName()));
     }
+
+    void saveDoesNotOverwriteAConcurrentRecordingState() {
+        QTemporaryDir root;
+        ProjectStore store(root.path());
+        SceneDocument document;
+        const auto created = store.create(document);
+        QVERIFY(created.ok());
+        QVERIFY(store.setState(created.project.directory, ProjectState::Recording).isEmpty());
+
+        document.setTitle(QStringLiteral("Edited while recording"));
+        QVERIFY(store.save(created.project, document).isEmpty());
+        const auto loaded = store.load(created.project.directory);
+        QVERIFY(loaded.ok());
+        QCOMPARE(loaded.project.state, ProjectState::Recording);
+        QCOMPARE(loaded.document->title(), QStringLiteral("Edited while recording"));
+    }
 };
 
 QTEST_GUILESS_MAIN(ProjectStoreTest)
