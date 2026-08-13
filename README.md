@@ -72,6 +72,8 @@ cd uxplay-studio
 
 The verified portable ZIP is written to `out\x64\artifacts`. See [the developer guide](docs/DEVELOPERS-GUIDE.md) for x64 and ARM64 details.
 
+On Windows, `.\build.ps1 package -Architecture x64 -SkipBootstrap -SkipInstaller` also refreshes the per-user install at `%LOCALAPPDATA%\UxPlay Studio` and rewrites the Desktop and Start Menu shortcuts to that exact latest executable. Close UxPlay Studio before packaging; use `-SkipLocalInstall` when you only want a portable artifact.
+
 ## Architecture
 
 ```text

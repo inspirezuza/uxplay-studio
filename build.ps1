@@ -15,7 +15,9 @@ param(
 
     [switch]$SkipBootstrap,
 
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+
+    [switch]$SkipLocalInstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -664,6 +666,18 @@ function Clear-BuildOutputs {
     }
 }
 
+function Install-LocalRuntime {
+    if ($SkipLocalInstall) {
+        Write-Host "Skipping local shortcut install (-SkipLocalInstall)."
+        return
+    }
+    if ($env:CI -eq "true" -or $env:GITHUB_ACTIONS -eq "true") {
+        Write-Host "Skipping local shortcut install in CI."
+        return
+    }
+    & (Join-Path $projectRoot "scripts\install-latest.ps1") -StageDir $stageDir
+}
+
 switch ($Action) {
     "bootstrap" {
         Install-Dependencies
@@ -681,6 +695,7 @@ switch ($Action) {
         Build-Application
         Stage-Runtime
         Test-Runtime -SkipStaticValidation
+        Install-LocalRuntime
         Build-Artifacts
         Write-Host "Artifacts are ready in $artifactDir"
     }
