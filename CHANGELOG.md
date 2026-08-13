@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.2
+
+- Fixed a startup crash caused by iterating over two different temporary Qt argument lists.
+- Added an isolated packaged-UI startup smoke test so releases must construct the real Studio window and render a snapshot successfully.
+
 ## 2.0.1
 
 - Moved direct AirPlay recording writes behind a bounded asynchronous handoff so a slow muxer cannot stall live mirroring; queue/start/finalization failures now leave the project Recoverable.

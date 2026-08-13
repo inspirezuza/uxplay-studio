@@ -107,6 +107,30 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "UxPlay Studio runtime self-test failed with exit code $LASTEXITCODE"
     }
+
+    # Exercise the real QApplication/MainWindow startup path. The lightweight
+    # self-test deliberately exits before constructing the UI and therefore
+    # cannot catch startup lifetime, style, or platform-plugin crashes.
+    $snapshot = Join-Path $TestCacheDir "startup-smoke.png"
+    if (Test-Path -LiteralPath $snapshot) {
+        Remove-Item -LiteralPath $snapshot -Force
+    }
+    $studio = Start-Process `
+        -FilePath (Join-Path $stage "uxplay-studio.exe") `
+        -ArgumentList "--ui-snapshot=$snapshot" `
+        -WorkingDirectory $stage `
+        -PassThru
+    if (-not $studio.WaitForExit(15000)) {
+        Stop-Process -Id $studio.Id -Force -ErrorAction SilentlyContinue
+        throw "UxPlay Studio UI startup smoke test timed out"
+    }
+    if ($studio.ExitCode -ne 0) {
+        throw "UxPlay Studio UI startup smoke test crashed with exit code $($studio.ExitCode)"
+    }
+    if (-not (Test-Path -LiteralPath $snapshot) -or
+        (Get-Item -LiteralPath $snapshot).Length -lt 1024) {
+        throw "UxPlay Studio UI startup smoke test did not produce a valid snapshot"
+    }
 }
 finally {
     foreach ($name in $environmentNames) {

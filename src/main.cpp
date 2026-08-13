@@ -104,8 +104,9 @@ int main(int argc, char *argv[]) {
 #endif
 
     QApplication app(argc, argv);
+    const QStringList arguments = app.arguments();
     const bool snapshotMode = std::any_of(
-        app.arguments().cbegin(), app.arguments().cend(), [](const QString &argument) {
+        arguments.cbegin(), arguments.cend(), [](const QString &argument) {
             return argument == QStringLiteral("--snapshot-edit") ||
                    argument == QStringLiteral("--snapshot-fullscreen") ||
                    argument.startsWith(QStringLiteral("--ui-snapshot="));
@@ -135,7 +136,7 @@ int main(int argc, char *argv[]) {
                          QProcessEnvironment::systemEnvironment().value("PATH");
     qputenv("PATH", path.toUtf8());
 
-    if (app.arguments().contains(QStringLiteral("--self-test"))) {
+    if (arguments.contains(QStringLiteral("--self-test"))) {
         return runRuntimeSelfTest(appPath);
     }
 
@@ -161,18 +162,18 @@ int main(int argc, char *argv[]) {
     std::unique_ptr<QTemporaryDir> snapshotProjects;
     if (snapshotMode) snapshotProjects = std::make_unique<QTemporaryDir>();
     MainWindow window(nullptr,
-                      !snapshotMode && !app.arguments().contains(QStringLiteral("--no-autostart")),
+                      !snapshotMode && !arguments.contains(QStringLiteral("--no-autostart")),
                       snapshotProjects ? snapshotProjects->path() : QString());
     window.show();
-    if (app.arguments().contains(QStringLiteral("--snapshot-edit"))) {
+    if (arguments.contains(QStringLiteral("--snapshot-edit"))) {
         for (QPushButton *button : window.findChildren<QPushButton *>())
             if (button->text() == QStringLiteral("Edit layout")) button->click();
     }
-    if (app.arguments().contains(QStringLiteral("--snapshot-fullscreen"))) {
+    if (arguments.contains(QStringLiteral("--snapshot-fullscreen"))) {
         if (auto *button = window.findChild<QPushButton *>(QStringLiteral("fullscreenButton")))
             button->click();
     }
-    for (const QString &argument : app.arguments()) {
+    for (const QString &argument : arguments) {
         if (!argument.startsWith(QStringLiteral("--ui-snapshot="))) continue;
         const QString output = argument.mid(QStringLiteral("--ui-snapshot=").size());
         QTimer::singleShot(250, &window, [&window, output]() {
