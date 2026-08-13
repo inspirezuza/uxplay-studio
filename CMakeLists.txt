@@ -21,6 +21,7 @@ set(UXPLAY_STUDIO_CORE_SOURCES
     src/studio/scenedocument.cpp
     src/studio/scenecanvas.cpp
     src/studio/cameraselfview.cpp
+    src/ui/studiovisuals.cpp
     src/projects/projectstore.cpp
     src/recording/sessionclock.cpp
     src/recording/recordingsession.cpp

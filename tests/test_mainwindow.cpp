@@ -2,10 +2,12 @@
 #include "projects/projectstore.h"
 #include "recording/recordingsession.h"
 #include "studio/cameraselfview.h"
+#include "studio/scenecanvas.h"
 #include "uxplay_api.h"
 
 #include <QApplication>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -77,6 +79,8 @@ private slots:
         auto *card = window.findChild<QWidget *>(QStringLiteral("playerCard"));
         auto *pageLayout = window.findChild<QHBoxLayout *>(QStringLiteral("playerPageLayout"));
         auto *playerLayout = window.findChild<QVBoxLayout *>(QStringLiteral("playerLayout"));
+        auto *stageLayout = window.findChild<QVBoxLayout *>(QStringLiteral("stageLayout"));
+        auto *stageHint = window.findChild<QLabel *>(QStringLiteral("stageHint"));
         auto *rendererBadge = window.findChild<QLabel *>(QStringLiteral("miniBadge"));
         auto *diagnostics = window.findChild<QPlainTextEdit *>(QStringLiteral("diagnosticsText"));
         auto *selfView = window.findChild<CameraSelfView *>(QStringLiteral("cameraSelfView"));
@@ -89,6 +93,8 @@ private slots:
         QVERIFY(card);
         QVERIFY(pageLayout);
         QVERIFY(playerLayout);
+        QVERIFY(stageLayout);
+        QVERIFY(stageHint);
         QVERIFY(rendererBadge);
         QVERIFY(diagnostics);
         QVERIFY(selfView);
@@ -113,6 +119,8 @@ private slots:
         QVERIFY(card->property("fullscreen").toBool());
         QCOMPARE(pageLayout->contentsMargins(), QMargins());
         QCOMPARE(playerLayout->contentsMargins(), QMargins());
+        QCOMPARE(stageLayout->contentsMargins(), QMargins());
+        QVERIFY(!stageHint->isVisible());
         QCOMPARE(QApplication::overrideCursor()->shape(), Qt::BlankCursor);
 
         QTest::keyClick(&window, Qt::Key_Escape);
@@ -123,9 +131,103 @@ private slots:
         QVERIFY(controls->isVisible());
         QVERIFY(selfView->isVisible());
         QVERIFY(!card->property("fullscreen").toBool());
-        QCOMPARE(pageLayout->contentsMargins(), QMargins(30, 24, 30, 30));
-        QCOMPARE(playerLayout->contentsMargins(), QMargins(18, 18, 18, 16));
+        QCOMPARE(pageLayout->contentsMargins(), QMargins());
+        QCOMPARE(playerLayout->contentsMargins(), QMargins());
+        QCOMPARE(stageLayout->contentsMargins(), QMargins(20, 18, 20, 12));
+        QVERIFY(stageHint->isVisible());
         QVERIFY(QApplication::overrideCursor() == nullptr);
+    }
+
+    void modernShellPrioritizesTheStageAndKeepsPrimaryActionsReachable() {
+        MainWindow window(nullptr, false);
+        window.show();
+        QTRY_VERIFY(window.isVisible());
+
+        auto *sidebar = window.findChild<QWidget *>(QStringLiteral("sidebar"));
+        auto *sessionPanel = window.findChild<QWidget *>(QStringLiteral("studioDock"));
+        auto *controls = window.findChild<QWidget *>(QStringLiteral("playerControls"));
+        auto *record = window.findChild<QPushButton *>(QStringLiteral("recordButton"));
+        auto *status = window.findChild<QLabel *>(QStringLiteral("statusBadge"));
+        QVERIFY(sidebar);
+        QVERIFY(sessionPanel);
+        QVERIFY(controls);
+        QVERIFY(record);
+        QVERIFY(status);
+        QCOMPARE(sidebar->width(), 112);
+        QVERIFY(sessionPanel->maximumWidth() <= 348);
+        QCOMPARE(record->parentWidget(), controls);
+        QCOMPARE(window.findChildren<QPushButton *>(QStringLiteral("navButton")).size(), 3);
+        QCOMPARE(window.findChildren<QWidget *>(QStringLiteral("connectStep")).size(), 3);
+        QVERIFY(status->styleSheet().isEmpty());
+        window.resize(1024, 680);
+        QCoreApplication::processEvents();
+        QVERIFY(controls->minimumSizeHint().width() <= controls->width());
+        QPushButton *edit = nullptr;
+        for (QPushButton *button : window.findChildren<QPushButton *>())
+            if (button->text() == QStringLiteral("Edit layout")) edit = button;
+        QVERIFY(edit);
+        QTest::mouseClick(edit, Qt::LeftButton);
+        QCoreApplication::processEvents();
+        QVERIFY(controls->minimumSizeHint().width() <= controls->width());
+        auto *layers = window.findChild<QListWidget *>(QStringLiteral("layerList"));
+        auto *canvas = window.findChild<SceneCanvas *>(QStringLiteral("sceneCanvas"));
+        QVERIFY(layers);
+        QVERIFY(canvas);
+        layers->setCurrentRow(0);
+        QDoubleSpinBox *xField = nullptr;
+        for (QDoubleSpinBox *field : window.findChildren<QDoubleSpinBox *>())
+            if (field->accessibleName() == QStringLiteral("layerTransformX")) xField = field;
+        QVERIFY(xField);
+        QVERIFY(xField->isEnabled());
+        const QString layerId = layers->item(0)->data(Qt::UserRole).toString();
+        xField->setValue(120.0);
+        QCOMPARE(canvas->document()->layer(SceneFormat::Wide, layerId)->transform.frame.x(), 120.0);
+        QVERIFY(canvas->undoStack()->canUndo());
+    }
+
+    void closingTheMainWindowDoesNotLeaveATrayOnlyInstance() {
+        const bool previousQuitOnLastWindow = QApplication::quitOnLastWindowClosed();
+        QApplication::setQuitOnLastWindowClosed(false);
+        auto *window = new MainWindow(nullptr, false);
+        window->setAttribute(Qt::WA_DeleteOnClose);
+        window->show();
+        QTRY_VERIFY(window->isVisible());
+
+        QSignalSpy destroyed(window, &QObject::destroyed);
+        QVERIFY(window->close());
+        QTRY_COMPARE(destroyed.count(), 1);
+
+        QApplication::setQuitOnLastWindowClosed(previousQuitOnLastWindow);
+    }
+
+    void closingWhileRecordingKeepsTheWindowOpen() {
+        QTemporaryDir projects;
+        const QString root = QDir(projects.path()).filePath(QStringLiteral("UxPlay Studio"));
+        ProjectStore store(root);
+        const auto created = store.create(SceneDocument{});
+        QVERIFY(created.ok());
+
+        MainWindow window(nullptr, false, projects.path());
+        window.show();
+        QTRY_VERIFY(window.isVisible());
+
+        auto *session = window.findChild<RecordingSession *>();
+        QVERIFY(session);
+        QVERIFY(session->start(created.project, {}));
+        QTRY_COMPARE(session->state(), RecordingState::Recording);
+
+        QSignalSpy destroyed(&window, &QObject::destroyed);
+        window.close();
+        QCoreApplication::processEvents();
+
+        QVERIFY(window.isVisible());
+        QCOMPARE(destroyed.count(), 0);
+        const auto labels = window.findChildren<QLabel *>(QStringLiteral("mutedLabel"));
+        QVERIFY(std::any_of(labels.cbegin(), labels.cend(), [](QLabel *label) {
+            return label->text().contains(
+                QStringLiteral("Stop recording before closing UxPlay Studio"));
+        }));
+        QVERIFY(session->stop());
     }
 
     void recordAndExportAreGatedWithActionableFeedback() {

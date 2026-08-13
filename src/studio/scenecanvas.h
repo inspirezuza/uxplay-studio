@@ -32,6 +32,7 @@ public:
     void cropSelection(const QMarginsF &crop);
     void setSelectionOpacity(qreal opacity);
     void setSelectionMask(SceneMask mask);
+    void setSelectionGeometry(const QRectF &frame, qreal rotationDegrees);
     void setSnapEnabled(bool enabled);
     bool snapEnabled() const;
     QUndoStack *undoStack();

@@ -16,6 +16,7 @@ UxPlay Studio keeps the receiver, live video, OBS-style sources and layers, reco
 - Embedded AirPlay video in the main app window
 - True borderless fullscreen with `F11` and `Esc`, plus an optional in-app camera self-view; no app chrome or detached window
 - Native Studio workspace with source/layer ordering, visibility, locking, multi-selection, and undo/redo
+- Stage-first creator interface with compact navigation, contextual live/edit controls, source cards, and an exact transform inspector
 - Direct canvas manipulation: drag, resize, crop with `Alt`, rotate, snap, fit, center, opacity, and masks
 - Independent 16:9 Wide and 9:16 Vertical compositions saved in each project
 - Local crash-recoverable recording with separate direct AirPlay video, system-audio loopback, camera, and microphone tracks

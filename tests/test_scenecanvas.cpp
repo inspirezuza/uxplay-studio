@@ -74,6 +74,27 @@ private slots:
         QVERIFY(normalized.left() + normalized.right() <= 0.98);
         QVERIFY(normalized.top() + normalized.bottom() <= 0.98);
     }
+
+    void exactGeometryEditsAreUndoable() {
+        SceneDocument document;
+        const QString source = document.addSource(SceneSourceType::Text,
+                                                  QStringLiteral("Title"));
+        const QString layer = document.addLayer(SceneFormat::Wide, source);
+        SceneCanvas canvas;
+        canvas.setDocument(&document, SceneFormat::Wide);
+        QVERIFY(canvas.selectLayer(layer));
+
+        canvas.setSelectionGeometry(QRectF(240, 180, 960, 200), 12.5);
+        const SceneTransform edited = document.layer(SceneFormat::Wide, layer)->transform;
+        QCOMPARE(edited.frame, QRectF(240, 180, 960, 200));
+        QCOMPARE(edited.rotationDegrees, 12.5);
+        QVERIFY(canvas.undoStack()->canUndo());
+
+        canvas.undoStack()->undo();
+        QVERIFY(document.layer(SceneFormat::Wide, layer)->transform != edited);
+        canvas.undoStack()->redo();
+        QCOMPARE(document.layer(SceneFormat::Wide, layer)->transform, edited);
+    }
 };
 
 QTEST_MAIN(SceneCanvasTest)

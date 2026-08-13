@@ -144,7 +144,7 @@ int main(int argc, char *argv[]) {
     if (theme.open(QIODevice::ReadOnly | QIODevice::Text)) {
         app.setStyleSheet(QString::fromUtf8(theme.readAll()));
     }
-    app.setQuitOnLastWindowClosed(false);
+    app.setQuitOnLastWindowClosed(true);
 
 #ifdef Q_OS_WIN
     HANDLE singleInstance = snapshotMode

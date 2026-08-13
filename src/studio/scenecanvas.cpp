@@ -325,6 +325,17 @@ void SceneCanvas::setSelectionMask(SceneMask mask) {
     pushTransforms(QStringLiteral("Change layer mask"), before, after);
 }
 
+void SceneCanvas::setSelectionGeometry(const QRectF &frame, qreal rotationDegrees) {
+    if (!frame.isValid() || frame.width() < 1.0 || frame.height() < 1.0) return;
+    const auto before = selectedTransforms();
+    if (before.size() != 1) return;
+    auto after = before;
+    auto it = after.begin();
+    it.value().frame = frame;
+    it.value().rotationDegrees = rotationDegrees;
+    pushTransforms(QStringLiteral("Edit layer geometry"), before, after);
+}
+
 void SceneCanvas::setSnapEnabled(bool enabled) { m_snapEnabled = enabled; }
 bool SceneCanvas::snapEnabled() const { return m_snapEnabled; }
 QUndoStack *SceneCanvas::undoStack() { return &m_undoStack; }
@@ -405,7 +416,10 @@ void SceneCanvas::keyPressEvent(QKeyEvent *event) {
     else if (event->key() == Qt::Key_Down) delta.setY(step);
     else if (event->key() == Qt::Key_Delete && m_document) {
         const QStringList ids = selectedLayerIds();
-        for (const QString &id : ids) m_document->removeLayer(m_format, id);
+        for (const QString &id : ids) {
+            const SceneLayer *layer = m_document->layer(m_format, id);
+            if (layer && !layer->locked) m_document->removeLayer(m_format, id);
+        }
         rebuild(); emit sceneChanged(); event->accept(); return;
     } else { QGraphicsView::keyPressEvent(event); return; }
     nudgeSelection(delta);

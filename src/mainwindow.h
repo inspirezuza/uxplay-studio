@@ -12,6 +12,7 @@
 class QAction;
 class QCheckBox;
 class QComboBox;
+class QDoubleSpinBox;
 class QCloseEvent;
 class QKeyEvent;
 class QLabel;
@@ -64,20 +65,22 @@ private:
     void selectPage(int page);
     void setStudioMode(bool edit);
     void setSceneFormat(bool vertical);
+    void setRecordingUiLocked(bool locked);
     void addStudioSource(int type);
     void refreshLayerList();
+    void refreshLayerInspector();
     void refreshProjectList();
     bool openProjectDirectory(const QString &directory);
     void toggleRecording();
     void exportCurrentProject();
-    void saveCurrentProject();
+    bool saveCurrentProject();
     void loadRecordedPreviews(const ProjectInfo &project);
     void setCameraPreviewEnabled(bool enabled);
     void handleCameraPreviewFrame(const QImage &frame);
 
     void startReceiver();
     void stopReceiver();
-    void restartReceiver();
+    bool restartReceiver();
     void toggleReceiver();
     void handleStateChanged(ReceiverState state);
     void handleReceiverEvent(const ReceiverEvent &event);
@@ -96,6 +99,8 @@ private:
     bool ensureBonjourAvailable();
     bool autostartEnabled() const;
     void setAutostart(bool enabled);
+    bool hasActiveRecordingWork() const;
+    void showBlockedExitFeedback(const QString &statusMessage, const QString &activityMessage);
 
     void enterFullscreen();
     void exitFullscreen();
@@ -109,7 +114,6 @@ private:
     bool m_quitting = false;
     bool m_fullscreen = false;
     bool m_cursorOverride = false;
-    bool m_closeHintShown = false;
     QByteArray m_geometryBeforeFullscreen;
     Qt::WindowStates m_windowStateBeforeFullscreen;
 
@@ -117,7 +121,9 @@ private:
     QWidget *m_header = nullptr;
     QStackedWidget *m_pages = nullptr;
     QList<QPushButton *> m_navigationButtons;
+    QList<QPushButton *> m_editActionButtons;
     QLabel *m_pageTitle = nullptr;
+    QLabel *m_pageEyebrow = nullptr;
     QLabel *m_statusBadge = nullptr;
     QLabel *m_sidebarReceiver = nullptr;
     QPushButton *m_receiverToggle = nullptr;
@@ -127,9 +133,13 @@ private:
     QWidget *m_playerCard = nullptr;
     QWidget *m_playerChrome = nullptr;
     QWidget *m_playerControls = nullptr;
+    QWidget *m_stageFrame = nullptr;
+    QLabel *m_stageHint = nullptr;
+    QVBoxLayout *m_stageLayout = nullptr;
     QHBoxLayout *m_playerPageLayout = nullptr;
     QVBoxLayout *m_playerLayout = nullptr;
     QWidget *m_sessionPanel = nullptr;
+    QWidget *m_transformPanel = nullptr;
     QLabel *m_sessionState = nullptr;
     QLabel *m_deviceName = nullptr;
     QLabel *m_deviceModel = nullptr;
@@ -171,6 +181,7 @@ private:
     QLabel *m_projectFeedback = nullptr;
     QPushButton *m_recoverProjectButton = nullptr;
     QLabel *m_recordingStatus = nullptr;
+    QLabel *m_sourceCount = nullptr;
     QPushButton *m_recordButton = nullptr;
     QPushButton *m_liveModeButton = nullptr;
     QPushButton *m_editModeButton = nullptr;
@@ -178,6 +189,14 @@ private:
     QPushButton *m_verticalButton = nullptr;
     QCheckBox *m_recordCamera = nullptr;
     QCheckBox *m_recordMicrophone = nullptr;
+    QDoubleSpinBox *m_layerX = nullptr;
+    QDoubleSpinBox *m_layerY = nullptr;
+    QDoubleSpinBox *m_layerWidth = nullptr;
+    QDoubleSpinBox *m_layerHeight = nullptr;
+    QDoubleSpinBox *m_layerRotation = nullptr;
+    QComboBox *m_layerOpacity = nullptr;
+    QComboBox *m_layerMask = nullptr;
+    bool m_updatingInspector = false;
     int m_sceneFormat = 0;
     QList<QThread *> m_previewThreads;
 };
