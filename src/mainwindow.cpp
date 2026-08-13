@@ -166,6 +166,13 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart, const QString &projectRo
     m_cameraPreviewEngine = new CameraPreviewEngine(this);
     connect(m_cameraPreviewEngine, &CameraPreviewEngine::frameReady,
             this, &MainWindow::handleCameraPreviewFrame);
+    connect(m_cameraPreviewEngine, &CameraPreviewEngine::stoppedUnexpectedly,
+            this, [this](const QString &message) {
+        if (m_cameraSelfView) m_cameraSelfView->setActive(false);
+        if (m_recordingStatus)
+            m_recordingStatus->setText(QStringLiteral("Camera preview stopped · %1").arg(message));
+        appendActivity(QStringLiteral("Camera"), message);
+    });
     m_pipelineRunner->setCameraPreviewCallback([this](const QImage &frame) {
         QMetaObject::invokeMethod(this, [this, frame]() { handleCameraPreviewFrame(frame); },
                                   Qt::QueuedConnection);
@@ -197,6 +204,8 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart, const QString &projectRo
     connect(m_recordingSession, &RecordingSession::warningRaised, this,
             [this](const QString &message) {
         appendActivity(QStringLiteral("Recording"), message);
+        if (m_recordingStatus)
+            m_recordingStatus->setText(m_recordingSession->statusSummary());
         if (message.contains(QStringLiteral("camera"), Qt::CaseInsensitive) && m_cameraSelfView)
             m_cameraSelfView->setActive(false);
     });

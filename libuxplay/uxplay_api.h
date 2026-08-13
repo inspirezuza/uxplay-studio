@@ -51,6 +51,7 @@ uxplay_recording_status uxplay_get_recording_status(void);
 void uxplay_set_recording_test_mode(int enabled);
 void uxplay_set_recording_test_start_result(int allowed);
 void uxplay_set_recording_test_stop_result(int clean);
+void uxplay_set_recording_test_runtime_failure(int failed);
 
 #ifdef __cplusplus
 }

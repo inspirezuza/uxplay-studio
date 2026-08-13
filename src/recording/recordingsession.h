@@ -7,6 +7,7 @@
 #include <QImage>
 #include <QMutex>
 #include <QStringList>
+#include <QTimer>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -16,6 +17,7 @@ public:
     virtual ~PipelineRunner() = default;
     virtual bool startTrack(const QString &name, const QString &pipeline, QString *error) = 0;
     virtual bool stopAll(int timeoutMs, QString *error) = 0;
+    virtual QStringList takeRuntimeFailures() { return {}; }
     virtual void setCameraPreviewCallback(std::function<void(const QImage &)> callback) {
         Q_UNUSED(callback)
     }
@@ -57,6 +59,7 @@ private:
     static void observeAirplayFirstMedia(std::int64_t monotonicNanoseconds, void *context);
     void observeTrackFirstMedia(const QString &track, qint64 monotonicNanoseconds);
     void scheduleManifestRefresh();
+    void checkRuntimeStatus();
     void transition(RecordingState state);
     bool writeSessionManifest(const QStringList &tracks);
     QHash<QString, qint64> measuredTrackOffsets(const QStringList &tracks) const;
@@ -76,4 +79,6 @@ private:
     bool m_manifestRefreshQueued = false;
     std::atomic_bool m_acceptTiming{false};
     bool m_airplayFailed = false;
+    bool m_optionalTrackFailed = false;
+    QTimer m_statusTimer;
 };

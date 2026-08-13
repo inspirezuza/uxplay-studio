@@ -31,9 +31,12 @@ RecordingSession::RecordingSession(ProjectStore *store, PipelineRunner *runner, 
     }
     uxplay_set_recording_first_media_callback(&RecordingSession::observeAirplayFirstMedia,
                                                this);
+    m_statusTimer.setInterval(200);
+    connect(&m_statusTimer, &QTimer::timeout, this, &RecordingSession::checkRuntimeStatus);
 }
 
 RecordingSession::~RecordingSession() {
+    m_statusTimer.stop();
     m_acceptTiming = false;
     uxplay_set_recording_first_media_callback(nullptr, nullptr);
     if (m_runner) m_runner->setTrackFirstMediaCallback({});
@@ -62,6 +65,7 @@ bool RecordingSession::start(const ProjectInfo &project, const RecordingOptions 
         m_manifestRefreshQueued = false;
     }
     m_airplayFailed = false;
+    m_optionalTrackFailed = false;
     m_acceptTiming = true;
     transition(RecordingState::Starting);
     if (!m_store->setState(project.directory, ProjectState::Recording).isEmpty()) {
@@ -108,11 +112,13 @@ bool RecordingSession::start(const ProjectInfo &project, const RecordingOptions 
         return false;
     }
     transition(RecordingState::Recording);
+    m_statusTimer.start();
     return true;
 }
 
 bool RecordingSession::stop() {
     if (m_state != RecordingState::Recording) return false;
+    m_statusTimer.stop();
     transition(RecordingState::Finalizing);
     m_store->setState(m_project.directory, ProjectState::Finalizing);
     QString optionalError;
@@ -121,9 +127,11 @@ bool RecordingSession::stop() {
     const bool airplayTrackClean = airplayStopClean && !m_airplayFailed;
     m_acceptTiming = false;
     const bool manifestClean = writeSessionManifest(m_activeTracks);
-    const bool clean = optionalTracksClean && airplayTrackClean && manifestClean;
+    const bool mediaClean = optionalTracksClean && !m_optionalTrackFailed &&
+                            airplayTrackClean && manifestClean;
     QStringList errors;
-    if (m_airplayFailed && !m_lastError.isEmpty()) errors.append(m_lastError);
+    if ((m_airplayFailed || m_optionalTrackFailed) && !m_lastError.isEmpty())
+        errors.append(m_lastError);
     if (!optionalError.isEmpty()) errors.append(optionalError);
     if (!airplayTrackClean) {
         const QString airplayError = QStringLiteral("The AirPlay video track could not be finalized safely");
@@ -131,8 +139,13 @@ bool RecordingSession::stop() {
     }
     if (!manifestClean)
         errors.append(QStringLiteral("Could not safely update session timing metadata"));
+    const QString stateError = m_store->setState(
+        m_project.directory, mediaClean ? ProjectState::Ready : ProjectState::Recoverable);
+    if (!stateError.isEmpty())
+        errors.append(QStringLiteral("Could not safely save the final project state: %1")
+                          .arg(stateError));
+    const bool clean = mediaClean && stateError.isEmpty();
     m_lastError = errors.join(QStringLiteral("; "));
-    m_store->setState(m_project.directory, clean ? ProjectState::Ready : ProjectState::Recoverable);
     transition(clean ? RecordingState::Idle : RecordingState::Failed);
     return clean;
 }
@@ -150,6 +163,22 @@ void RecordingSession::markAirplayFailure(const QString &message) {
     }
 }
 
+void RecordingSession::checkRuntimeStatus() {
+    if (m_state != RecordingState::Recording) return;
+    if (uxplay_get_recording_status() == UXPLAY_RECORDING_FAILED) {
+        markAirplayFailure(QStringLiteral(
+            "The AirPlay recording track failed while recording; stop now to preserve recoverable media"));
+    }
+    for (const QString &failure : m_runner->takeRuntimeFailures()) {
+        m_optionalTrackFailed = true;
+        m_lastError = failure;
+        if (!m_warnings.contains(failure)) {
+            m_warnings.append(failure);
+            emit warningRaised(failure);
+        }
+    }
+}
+
 RecordingState RecordingSession::state() const { return m_state; }
 QString RecordingSession::lastError() const { return m_lastError; }
 QStringList RecordingSession::warnings() const { return m_warnings; }
@@ -159,7 +188,7 @@ QString RecordingSession::statusSummary() const {
     case RecordingState::Starting:
         return QStringLiteral("Starting independent tracks...");
     case RecordingState::Recording:
-        if (m_airplayFailed)
+        if (m_airplayFailed || m_optionalTrackFailed)
             return QStringLiteral("Recording issue - stop now to preserve recoverable media");
         if (!m_warnings.isEmpty()) {
             return QStringLiteral("REC - %1 active - %2 unavailable")

@@ -5,6 +5,9 @@
 #include <QTemporaryDir>
 #include <QtTest>
 #include <gst/gst.h>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 #include <atomic>
 
@@ -172,6 +175,34 @@ private slots:
         QVERIFY(store.recoverableProjects().isEmpty());
         QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Ready);
         QVERIFY(!QFileInfo::exists(partial));
+    }
+
+    void interruptedExportStaysExportingWhenPartialCleanupIsBlocked() {
+#ifndef Q_OS_WIN
+        QSKIP("The deterministic file-lock seam is Windows-specific");
+#else
+        QTemporaryDir root;
+        ProjectStore store(root.path());
+        SceneDocument document;
+        const auto created = store.create(document);
+        QVERIFY(created.ok());
+        QVERIFY(store.setState(created.project.directory, ProjectState::Exporting).isEmpty());
+        const QString partial = QDir(created.project.exportsDirectory())
+            .filePath(QStringLiteral("locked.mp4.partial"));
+        const HANDLE lock = CreateFileW(
+            reinterpret_cast<LPCWSTR>(partial.utf16()), GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        QVERIFY(lock != INVALID_HANDLE_VALUE);
+
+        QVERIFY(store.recoverableProjects().isEmpty());
+        QCOMPARE(store.load(created.project.directory).project.state,
+                 ProjectState::Exporting);
+        CloseHandle(lock);
+
+        QVERIFY(store.recoverableProjects().isEmpty());
+        QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Ready);
+        QVERIFY(!QFileInfo::exists(partial));
+#endif
     }
 
     void concurrentStateAndSceneUpdatesPreserveBoth() {

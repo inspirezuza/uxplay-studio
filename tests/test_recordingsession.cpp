@@ -1,5 +1,6 @@
 #include "projects/projectstore.h"
 #include "recording/recordingsession.h"
+#include "recording/gstpipelinerunner.h"
 #include "uxplay_api.h"
 #include "renderers/mux_renderer.h"
 
@@ -11,6 +12,9 @@
 #include <QtTest>
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 namespace {
 void discardLog(void *, int, const char *) {}
@@ -24,7 +28,15 @@ public:
         pipelines.append(pipeline);
         return !failed.contains(name);
     }
-    bool stopAll(int, QString *) override { stopped = true; return true; }
+    bool stopAll(int, QString *) override {
+        stopped = true;
+        return runtimeFailures.isEmpty();
+    }
+    QStringList takeRuntimeFailures() override {
+        const QStringList failures = runtimeFailures;
+        runtimeFailures.clear();
+        return failures;
+    }
     void setTrackFirstMediaCallback(
         std::function<void(const QString &, qint64)> callback) override {
         firstMediaCallback = std::move(callback);
@@ -35,6 +47,7 @@ public:
     QStringList names;
     QStringList pipelines;
     QStringList failed;
+    QStringList runtimeFailures;
     bool stopped = false;
     std::function<void(const QString &, qint64)> firstMediaCallback;
 };
@@ -53,6 +66,7 @@ private slots:
     void cleanup() {
         uxplay_set_recording_test_start_result(1);
         uxplay_set_recording_test_stop_result(1);
+        uxplay_set_recording_test_runtime_failure(0);
     }
 
     void startsIndependentRecoverableTracksAndFinalizesProject() {
@@ -319,6 +333,97 @@ private slots:
         QVERIFY(next.ok());
         QVERIFY2(session.start(next.project, options), qPrintable(session.lastError()));
         QVERIFY(session.stop());
+    }
+
+    void asynchronousMuxFailureUpdatesTheLiveSessionStatus() {
+        QTemporaryDir temp;
+        ProjectStore store(temp.path());
+        SceneDocument scene;
+        const auto created = store.create(scene);
+        QVERIFY(created.ok());
+        FakePipelineRunner runner;
+        RecordingSession session(&store, &runner);
+        QVERIFY(session.start(created.project, {}));
+
+        uxplay_set_recording_test_runtime_failure(1);
+        QTRY_VERIFY_WITH_TIMEOUT(
+            session.statusSummary().contains(QStringLiteral("Recording issue")), 1000);
+        QVERIFY(!session.stop());
+        QCOMPARE(store.load(created.project.directory).project.state,
+                 ProjectState::Recoverable);
+    }
+
+    void optionalTrackRuntimeFailureIsVisibleAndRecoverable() {
+        QTemporaryDir temp;
+        ProjectStore store(temp.path());
+        const auto created = store.create(SceneDocument{});
+        QVERIFY(created.ok());
+        FakePipelineRunner runner;
+        RecordingSession session(&store, &runner);
+        RecordingOptions options;
+        options.camera = true;
+        QVERIFY(session.start(created.project, options));
+
+        runner.runtimeFailures.append(QStringLiteral("camera track stopped unexpectedly"));
+        QTRY_VERIFY_WITH_TIMEOUT(
+            session.statusSummary().contains(QStringLiteral("Recording issue")), 1000);
+        QVERIFY(session.warnings().join(' ').contains(QStringLiteral("camera")));
+        QVERIFY(!session.stop());
+        QVERIFY(session.lastError().contains(QStringLiteral("camera")));
+        QCOMPARE(store.load(created.project.directory).project.state,
+                 ProjectState::Recoverable);
+    }
+
+    void finalStateWriteFailureCannotReportASuccessfulStop() {
+#ifndef Q_OS_WIN
+        QSKIP("The deterministic manifest-lock seam is Windows-specific");
+#else
+        QTemporaryDir temp;
+        ProjectStore store(temp.path());
+        const auto created = store.create(SceneDocument{});
+        QVERIFY(created.ok());
+        FakePipelineRunner runner;
+        RecordingSession session(&store, &runner);
+        QVERIFY(session.start(created.project, {}));
+
+        const HANDLE lock = CreateFileW(
+            reinterpret_cast<LPCWSTR>(created.project.manifestPath().utf16()),
+            GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        QVERIFY(lock != INVALID_HANDLE_VALUE);
+        QVERIFY(!session.stop());
+        QCOMPARE(session.state(), RecordingState::Failed);
+        QVERIFY(session.lastError().contains(QStringLiteral("final project state")));
+        QCOMPARE(store.load(created.project.directory).project.state,
+                 ProjectState::Recording);
+        CloseHandle(lock);
+
+        store.recoverableProjects();
+        QCOMPARE(store.load(created.project.directory).project.state,
+                 ProjectState::Recoverable);
+#endif
+    }
+
+    void gstreamerRunnerReportsARealRuntimePipelineError() {
+        GstPipelineRunner runner;
+        QString error;
+        QVERIFY2(runner.startTrack(
+                     QStringLiteral("camera"),
+                     QStringLiteral(
+                         "videotestsrc is-live=true num-buffers=60 ! video/x-raw,framerate=30/1 "
+                         "! identity name=studio-track-origin silent=true "
+                         "! fakesink sync=false"),
+                     &error),
+                 qPrintable(error));
+
+        QStringList failures;
+        const auto observedFailure = [&]() {
+            failures.append(runner.takeRuntimeFailures());
+            return !failures.isEmpty();
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(observedFailure(), 4000);
+        QVERIFY(failures.join(' ').contains(QStringLiteral("camera")));
+        QVERIFY(!runner.stopAll(500, &error));
     }
 };
 

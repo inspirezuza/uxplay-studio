@@ -22,6 +22,19 @@ private slots:
         QVERIFY(!preview.isRunning());
     }
 
+    void reportsUnexpectedEndOfStreamAndStopsThePreview() {
+        CameraPreviewEngine preview;
+        QSignalSpy stopped(&preview, &CameraPreviewEngine::stoppedUnexpectedly);
+        QString error;
+        QVERIFY2(preview.start(
+                     &error,
+                     QStringLiteral("videotestsrc is-live=true ! identity error-after=12")),
+                 qPrintable(error));
+        QTRY_COMPARE_WITH_TIMEOUT(stopped.count(), 1, 5000);
+        QVERIFY(!preview.isRunning());
+        QVERIFY(!stopped.first().first().toString().isEmpty());
+    }
+
     void selfViewRemainsAChildInsideTheStudioWindow() {
         QWidget studio;
         studio.resize(900, 600);

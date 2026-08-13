@@ -370,6 +370,10 @@ extern "C" void uxplay_set_recording_test_start_result(int allowed) {
     recording_test_start_allowed = allowed != 0;
 }
 
+extern "C" void uxplay_set_recording_test_runtime_failure(int failed) {
+    mux_recording_failed = failed != 0;
+}
+
 //Support for D-Bus-based screensaver inhibition (org.freedesktop.ScreenSaver) 
 static unsigned int scrsv = 0;
 #ifdef DBUS 

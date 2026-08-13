@@ -10,6 +10,9 @@
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
 #include <gst/video/video.h>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 namespace {
 bool runPipeline(const QString &description, QString *error) {
@@ -250,6 +253,40 @@ private slots:
         QVERIFY(failed.first().first().toString().contains(QStringLiteral("Recover")));
         QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Recoverable);
         QVERIFY(!QFileInfo::exists(output));
+    }
+
+    void failedPartialCleanupIsSurfacedAndDoesNotClaimReady() {
+#ifndef Q_OS_WIN
+        QSKIP("The deterministic file-lock seam is Windows-specific");
+#else
+        QTemporaryDir temp;
+        ProjectStore store(temp.path());
+        SceneDocument scene;
+        const QString airplay = scene.addSource(SceneSourceType::AirPlay,
+                                                QStringLiteral("Missing recording"));
+        scene.addLayer(SceneFormat::Wide, airplay);
+        const auto created = store.create(scene);
+        QVERIFY(created.ok());
+
+        const QString output = QDir(created.project.exportsDirectory())
+            .filePath(QStringLiteral("locked-failure.mp4"));
+        const QString partial = output + QStringLiteral(".partial");
+        const HANDLE lock = CreateFileW(
+            reinterpret_cast<LPCWSTR>(partial.utf16()), GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        QVERIFY(lock != INVALID_HANDLE_VALUE);
+
+        ExportJob job(&store);
+        QSignalSpy failed(&job, &ExportJob::failed);
+        QVERIFY(job.start(created.project, scene, SceneFormat::Wide, output));
+        QTRY_COMPARE_WITH_TIMEOUT(failed.count(), 1, 10000);
+        QVERIFY(failed.first().first().toString().contains(
+            QStringLiteral("could not be removed or preserved")));
+        QCOMPARE(store.load(created.project.directory).project.state,
+                 ProjectState::Exporting);
+        CloseHandle(lock);
+        QVERIFY(QFile::remove(partial));
+#endif
     }
 };
 

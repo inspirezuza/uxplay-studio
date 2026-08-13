@@ -99,24 +99,63 @@ bool GstPipelineRunner::stopAll(int timeoutMs, QString *error) {
     bool clean = true;
     QElapsedTimer elapsed;
     elapsed.start();
-    for (const Track &track : m_tracks) gst_element_send_event(track.pipeline, gst_event_new_eos());
     for (const Track &track : m_tracks) {
-        GstBus *bus = gst_element_get_bus(track.pipeline);
-        const int remaining = qMax(0, timeoutMs - static_cast<int>(elapsed.elapsed()));
-        GstMessage *message = gst_bus_timed_pop_filtered(
-            bus, static_cast<GstClockTime>(remaining) * GST_MSECOND,
-            static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
-        if (!message || GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
+        if (!track.failed) gst_element_send_event(track.pipeline, gst_event_new_eos());
+    }
+    for (const Track &track : m_tracks) {
+        GstMessage *message = nullptr;
+        GstBus *bus = nullptr;
+        if (!track.failed) {
+            bus = gst_element_get_bus(track.pipeline);
+            const int remaining = qMax(0, timeoutMs - static_cast<int>(elapsed.elapsed()));
+            message = gst_bus_timed_pop_filtered(
+                bus, static_cast<GstClockTime>(remaining) * GST_MSECOND,
+                static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+        }
+        if (track.failed || !message || GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
             clean = false;
-            if (error && error->isEmpty()) *error = QStringLiteral("%1 did not finalize cleanly").arg(track.name);
+            if (error && error->isEmpty()) {
+                *error = track.failure.isEmpty()
+                    ? QStringLiteral("%1 did not finalize cleanly").arg(track.name)
+                    : track.failure;
+            }
         }
         if (message) gst_message_unref(message);
-        gst_object_unref(bus);
+        if (bus) gst_object_unref(bus);
         gst_element_set_state(track.pipeline, GST_STATE_NULL);
         gst_object_unref(track.pipeline);
     }
     m_tracks.clear();
     return clean;
+}
+
+QStringList GstPipelineRunner::takeRuntimeFailures() {
+    QStringList failures;
+    for (Track &track : m_tracks) {
+        if (track.failed) continue;
+        GstBus *bus = gst_element_get_bus(track.pipeline);
+        GstMessage *message = gst_bus_pop_filtered(
+            bus, static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+        gst_object_unref(bus);
+        if (!message) continue;
+
+        QString detail;
+        if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
+            GError *gstError = nullptr;
+            gchar *debug = nullptr;
+            gst_message_parse_error(message, &gstError, &debug);
+            if (gstError) detail = QString::fromUtf8(gstError->message);
+            if (gstError) g_error_free(gstError);
+            g_free(debug);
+        }
+        gst_message_unref(message);
+        track.failed = true;
+        track.failure = detail.isEmpty()
+            ? QStringLiteral("%1 track stopped unexpectedly").arg(track.name)
+            : QStringLiteral("%1 track stopped unexpectedly: %2").arg(track.name, detail);
+        failures.append(track.failure);
+    }
+    return failures;
 }
 
 void GstPipelineRunner::setCameraPreviewCallback(

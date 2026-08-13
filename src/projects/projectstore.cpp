@@ -231,14 +231,16 @@ QList<ProjectSummary> ProjectStore::recoverableProjects() {
         auto loaded = loadUnlocked(root.filePath(name));
         if (!loaded.ok()) continue;
         if (loaded.project.state == ProjectState::Exporting) {
-            loaded.project.state = ProjectState::Ready;
-            loaded.project.updatedAtUtc = QDateTime::currentDateTimeUtc();
-            if (!writeManifest(loaded.project, *loaded.document).isEmpty()) continue;
+            bool partialsRemoved = true;
             QDir exports(loaded.project.exportsDirectory());
             for (const QString &partial : exports.entryList(
                      {QStringLiteral("*.partial")}, QDir::Files)) {
-                exports.remove(partial);
+                if (!exports.remove(partial)) partialsRemoved = false;
             }
+            if (!partialsRemoved) continue;
+            loaded.project.state = ProjectState::Ready;
+            loaded.project.updatedAtUtc = QDateTime::currentDateTimeUtc();
+            if (!writeManifest(loaded.project, *loaded.document).isEmpty()) continue;
         } else if (loaded.project.state == ProjectState::Recording ||
                    loaded.project.state == ProjectState::Finalizing) {
             loaded.project.state = ProjectState::Recoverable;

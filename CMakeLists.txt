@@ -175,6 +175,7 @@ add_test(NAME sessionclock COMMAND test-sessionclock)
 add_executable(test-recordingsession
     tests/test_recordingsession.cpp
     src/recording/recordingsession.cpp
+    src/recording/gstpipelinerunner.cpp
     src/projects/projectstore.cpp
     src/studio/scenedocument.cpp
 )

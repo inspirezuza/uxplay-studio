@@ -120,6 +120,28 @@ void attachMasks(GstElement *pipeline) {
         }
     }
 }
+
+bool cleanOrPreservePartial(const QString &temporaryOutput, QString *error) {
+    if (!QFileInfo::exists(temporaryOutput) || QFile::remove(temporaryOutput)) return true;
+
+    QString preserved = temporaryOutput + QStringLiteral(".incomplete");
+    for (int suffix = 2; QFileInfo::exists(preserved); ++suffix) {
+        preserved = temporaryOutput + QStringLiteral(".incomplete-%1").arg(suffix);
+    }
+    if (QFile::rename(temporaryOutput, preserved)) {
+        if (error) {
+            *error += QStringLiteral("; the unpublished partial output was preserved as %1")
+                          .arg(QFileInfo(preserved).fileName());
+        }
+        return true;
+    }
+    if (error) {
+        *error += QStringLiteral(
+            "; the unpublished partial output could not be removed or preserved; "
+            "the project remains Exporting so cleanup can be retried");
+    }
+    return false;
+}
 }
 
 ExportJob::ExportJob(ProjectStore *store, QObject *parent) : QObject(parent), m_store(store) {}
@@ -158,10 +180,12 @@ bool ExportJob::start(const ProjectInfo &project, const SceneDocument &scene,
         const QString temporaryOutput = outputPath + QStringLiteral(".partial");
         QFile::remove(temporaryOutput);
         const auto restoreReadyAfterFailure = [this, &project, &temporaryOutput](QString error) {
-            QFile::remove(temporaryOutput);
-            const QString stateError = m_store->setState(project.directory, ProjectState::Ready);
-            if (!stateError.isEmpty()) {
-                error += QStringLiteral("; project state could not be restored: %1").arg(stateError);
+            const bool outputClean = cleanOrPreservePartial(temporaryOutput, &error);
+            if (outputClean) {
+                const QString stateError = m_store->setState(project.directory, ProjectState::Ready);
+                if (!stateError.isEmpty()) {
+                    error += QStringLiteral("; project state could not be restored: %1").arg(stateError);
+                }
             }
             emit failed(error);
         };

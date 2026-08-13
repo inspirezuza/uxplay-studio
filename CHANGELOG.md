@@ -14,6 +14,7 @@
 - Published exports only after a completed pipeline by moving a `.partial` file into place.
 - Included measured track offsets in export duration so static overlays remain visible through delayed tracks.
 - Restored empty projects to Ready after a direct-track startup failure so recording can be retried.
+- Surfaced asynchronous mux, recording-track, and camera-preview failures while they happen, and kept projects non-Ready when media or an unpublished export could not be cleaned up safely.
 
 ## 2.0.0
 

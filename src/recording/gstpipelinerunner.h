@@ -16,6 +16,7 @@ public:
     ~GstPipelineRunner() override;
     bool startTrack(const QString &name, const QString &pipeline, QString *error) override;
     bool stopAll(int timeoutMs, QString *error) override;
+    QStringList takeRuntimeFailures() override;
     void setCameraPreviewCallback(std::function<void(const QImage &)> callback) override;
     void setTrackFirstMediaCallback(
         std::function<void(const QString &, qint64)> callback) override;
@@ -28,7 +29,12 @@ private:
         GstPipelineRunner *runner = nullptr;
         QString track;
     };
-    struct Track { QString name; GstElement *pipeline = nullptr; };
+    struct Track {
+        QString name;
+        GstElement *pipeline = nullptr;
+        bool failed = false;
+        QString failure;
+    };
     QList<Track> m_tracks;
     QMutex m_previewMutex;
     std::function<void(const QImage &)> m_cameraPreviewCallback;

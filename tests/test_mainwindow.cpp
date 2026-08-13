@@ -1,6 +1,8 @@
 #include "mainwindow.h"
 #include "projects/projectstore.h"
+#include "recording/recordingsession.h"
 #include "studio/cameraselfview.h"
+#include "uxplay_api.h"
 
 #include <QApplication>
 #include <QDir>
@@ -53,7 +55,14 @@ class MainWindowTest final : public QObject {
     Q_OBJECT
 
 private slots:
-    void initTestCase() { gst_init(nullptr, nullptr); }
+    void initTestCase() {
+        gst_init(nullptr, nullptr);
+        uxplay_set_recording_test_mode(1);
+    }
+
+    void cleanup() { uxplay_set_recording_test_runtime_failure(0); }
+
+    void cleanupTestCase() { uxplay_set_recording_test_mode(0); }
 
     void fullscreenShowsOnlyTheVideoSurfaceAndRestoresChrome() {
         MainWindow window(nullptr, false);
@@ -138,6 +147,28 @@ private slots:
         QVERIFY(std::any_of(labels.cbegin(), labels.cend(), [](QLabel *label) {
             return label->text().contains(QStringLiteral("Record or open a project"));
         }));
+    }
+
+    void recordingRuntimeFailureUpdatesTheVisibleStatus() {
+        QTemporaryDir projects;
+        const QString root = QDir(projects.path()).filePath(QStringLiteral("UxPlay Studio"));
+        ProjectStore store(root);
+        const auto created = store.create(SceneDocument{});
+        QVERIFY(created.ok());
+        MainWindow window(nullptr, false, projects.path());
+        auto *session = window.findChild<RecordingSession *>();
+        QVERIFY(session);
+        QLabel *status = nullptr;
+        for (QLabel *label : window.findChildren<QLabel *>(QStringLiteral("mutedLabel"))) {
+            if (label->text() == QStringLiteral("Ready to record")) status = label;
+        }
+        QVERIFY(status);
+        QVERIFY(session->start(created.project, {}));
+
+        uxplay_set_recording_test_runtime_failure(1);
+        QTRY_VERIFY_WITH_TIMEOUT(
+            status->text().contains(QStringLiteral("Recording issue")), 1000);
+        QVERIFY(!session->stop());
     }
 
     void projectsPageExposesAndRecoversInterruptedProjects() {

@@ -4,6 +4,8 @@
 
 CameraPreviewEngine::CameraPreviewEngine(QObject *parent) : QObject(parent) {
     if (!gst_is_initialized()) gst_init(nullptr, nullptr);
+    m_busTimer.setInterval(100);
+    connect(&m_busTimer, &QTimer::timeout, this, &CameraPreviewEngine::pollBus);
 }
 
 CameraPreviewEngine::~CameraPreviewEngine() {
@@ -61,10 +63,12 @@ bool CameraPreviewEngine::start(QString *error, const QString &sourceOverride) {
         return false;
     }
     gst_object_unref(bus);
+    m_busTimer.start();
     return true;
 }
 
 void CameraPreviewEngine::stop() {
+    m_busTimer.stop();
     if (!m_pipeline) return;
     if (m_sink) {
         GstAppSinkCallbacks callbacks{};
@@ -79,6 +83,28 @@ void CameraPreviewEngine::stop() {
 
 bool CameraPreviewEngine::isRunning() const {
     return m_pipeline != nullptr;
+}
+
+void CameraPreviewEngine::pollBus() {
+    if (!m_pipeline) return;
+    GstBus *bus = gst_element_get_bus(m_pipeline);
+    GstMessage *message = gst_bus_pop_filtered(
+        bus, static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
+    gst_object_unref(bus);
+    if (!message) return;
+
+    QString failure = QStringLiteral("The camera preview stopped unexpectedly");
+    if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
+        GError *gstError = nullptr;
+        gchar *debug = nullptr;
+        gst_message_parse_error(message, &gstError, &debug);
+        if (gstError && gstError->message) failure = QString::fromUtf8(gstError->message);
+        if (gstError) g_error_free(gstError);
+        g_free(debug);
+    }
+    gst_message_unref(message);
+    stop();
+    emit stoppedUnexpectedly(failure);
 }
 
 GstFlowReturn CameraPreviewEngine::pullSample(GstAppSink *sink, gpointer context) {

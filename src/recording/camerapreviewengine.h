@@ -2,6 +2,7 @@
 
 #include <QImage>
 #include <QObject>
+#include <QTimer>
 
 #include <gst/app/gstappsink.h>
 
@@ -18,10 +19,13 @@ public:
 
 signals:
     void frameReady(const QImage &frame);
+    void stoppedUnexpectedly(const QString &message);
 
 private:
     static GstFlowReturn pullSample(GstAppSink *sink, gpointer context);
+    void pollBus();
 
     GstElement *m_pipeline = nullptr;
     GstElement *m_sink = nullptr;
+    QTimer m_busTimer;
 };
