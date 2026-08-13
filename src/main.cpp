@@ -9,9 +9,13 @@
 #include <QPushButton>
 #include <QTextStream>
 #include <QTimer>
+#include <QTemporaryDir>
 
 #include <gst/gst.h>
 #include <gst/video/videooverlay.h>
+
+#include <algorithm>
+#include <memory>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -100,6 +104,12 @@ int main(int argc, char *argv[]) {
 #endif
 
     QApplication app(argc, argv);
+    const bool snapshotMode = std::any_of(
+        app.arguments().cbegin(), app.arguments().cend(), [](const QString &argument) {
+            return argument == QStringLiteral("--snapshot-edit") ||
+                   argument == QStringLiteral("--snapshot-fullscreen") ||
+                   argument.startsWith(QStringLiteral("--ui-snapshot="));
+        });
     app.setOrganizationName(QStringLiteral("inspirezuza"));
     app.setOrganizationDomain(QStringLiteral("github.com/inspirezuza"));
     app.setApplicationName(QStringLiteral("UxPlay Studio"));
@@ -136,8 +146,9 @@ int main(int argc, char *argv[]) {
     app.setQuitOnLastWindowClosed(false);
 
 #ifdef Q_OS_WIN
-    HANDLE singleInstance = CreateMutexW(nullptr, TRUE, L"Local\\UxPlayStudio.SingleInstance");
-    if (singleInstance && GetLastError() == ERROR_ALREADY_EXISTS) {
+    HANDLE singleInstance = snapshotMode
+        ? nullptr : CreateMutexW(nullptr, TRUE, L"Local\\UxPlayStudio.SingleInstance");
+    if (!snapshotMode && singleInstance && GetLastError() == ERROR_ALREADY_EXISTS) {
         if (HWND existing = FindWindowW(nullptr, L"UxPlay Studio")) {
             ShowWindow(existing, SW_RESTORE);
             SetForegroundWindow(existing);
@@ -147,7 +158,11 @@ int main(int argc, char *argv[]) {
     }
 #endif
 
-    MainWindow window(nullptr, !app.arguments().contains(QStringLiteral("--no-autostart")));
+    std::unique_ptr<QTemporaryDir> snapshotProjects;
+    if (snapshotMode) snapshotProjects = std::make_unique<QTemporaryDir>();
+    MainWindow window(nullptr,
+                      !snapshotMode && !app.arguments().contains(QStringLiteral("--no-autostart")),
+                      snapshotProjects ? snapshotProjects->path() : QString());
     window.show();
     if (app.arguments().contains(QStringLiteral("--snapshot-edit"))) {
         for (QPushButton *button : window.findChildren<QPushButton *>())

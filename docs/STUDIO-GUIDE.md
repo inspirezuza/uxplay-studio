@@ -12,7 +12,7 @@ UxPlay Studio 2 keeps mirroring, layout editing, recording, recovery, and export
 
 ## Sources and layers
 
-AirPlay is created automatically. Camera, image, text, and color sources can be added from the Sources section. Each source gets a layer in both output formats; transforms remain independent.
+AirPlay is created automatically. Camera, image, text, and color sources can be added from the Sources section. Each source gets a layer in both output formats; transforms remain independent. Adding Camera also starts a live presenter preview. Its small self-view can be dragged or resized inside the Studio window and stays available in fullscreen; that viewing position is independent of the camera layer used by export.
 
 Layers are drawn from bottom to top. Drag them in the list or use Up/Down to change order. A layer can be hidden, locked, removed, given an opacity, or masked as a rounded rectangle or circle. Crop, rotation, opacity, and masks are applied by the MP4 exporter as well as the canvas preview.
 
@@ -25,19 +25,19 @@ Select optional camera and microphone tracks, then press **Record** while an iPa
 - presenter camera, when enabled
 - presenter microphone, when enabled
 
-The AirPlay track records the encoded stream directly before display, so it stays isolated from window movement, fullscreen, page changes, or other windows covering Studio. Camera and microphone tracks are recorded independently, and every track is segmented every 30 seconds. Recording does not add work to the low-latency display path. The editor uses bounded live or recorded preview frames so transforms reflect the media that will be exported.
+The AirPlay track preserves the encoded stream, so it stays isolated from window movement, fullscreen, page changes, or other windows covering Studio. Its receive callback places packets into a bounded nonblocking handoff; a dedicated worker performs muxing and finalization away from the low-latency display path. If the worker cannot keep up, the recording is marked failed/Recoverable instead of slowing the live screen. Camera and microphone tracks are recorded independently, and every track is segmented every 30 seconds. The editor uses bounded live or recorded preview frames so transforms reflect the media that will be exported. Studio observes the first accepted sample on each track, stores their relative monotonic offsets, and reapplies those measured offsets during export.
 
 If an optional device is unavailable, the main AirPlay recording continues and the Studio shows a warning. The AirPlay video track is required.
 
 ## Recovery and export
 
-Projects left in Recording, Finalizing, or Exporting state after an interruption are marked **Recoverable** on the next launch. Open Projects, select the entry, then choose **Recover session**. Already finalized Matroska segments are retained.
+Projects left in Recording or Finalizing state after an interruption are marked **Recoverable** on the next launch. Open Projects, select the entry, then choose **Recover session**. Studio validates finalized Matroska streams before marking the project Ready, retains usable segments, and renames rejected partial/corrupt fragments with an `.incomplete` suffix rather than deleting them. A project without usable AirPlay video stays Recoverable and explains why. An interrupted export does not damage its source project: Studio returns the project to Ready and removes the unpublished `.partial` output.
 
-Open any project in Studio, choose Wide or Vertical, adjust the layers, and select **Export MP4**. Export runs in the background and writes to the project's `exports` folder. It uses the saved position, size, crop, arbitrary rotation, opacity, order, and masks, and mixes available AirPlay and microphone audio.
+Open a Ready project in Studio, choose Wide or Vertical, adjust the layers, and select **Export MP4**. Recoverable projects must pass **Recover session** first. Export runs in the background and writes to the project's `exports` folder. It uses the saved position, size, crop, arbitrary rotation, opacity, order, and masks, and mixes available system-loopback and microphone audio. The final MP4 name appears only after the export pipeline completes.
 
 ## Shortcuts
 
-- `F11`: live video-only fullscreen
+- `F11`: live borderless fullscreen (the optional camera self-view remains available)
 - `Esc`: leave fullscreen
 - `Ctrl+Z` / `Ctrl+Y`: undo / redo on the canvas
 - Arrow keys: nudge selected unlocked layers

@@ -26,6 +26,10 @@ QString receiverStateColor(ReceiverState state) {
     return QStringLiteral("#8290a8");
 }
 
+bool receiverToggleStops(ReceiverState state) {
+    return state != ReceiverState::Stopped;
+}
+
 ReceiverState ReceiverStateMachine::state() const {
     return m_state;
 }

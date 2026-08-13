@@ -82,6 +82,24 @@ private slots:
         QCOMPARE(layer->transform.opacity, 0.82);
         QCOMPARE(layer->transform.mask, SceneMask::RoundedRectangle);
     }
+
+    void normalizesOpposingCropMarginsToKeepVisibleContent() {
+        SceneDocument document;
+        const QString source = document.addSource(SceneSourceType::AirPlay,
+                                                   QStringLiteral("iPad"));
+        const QString layer = document.addLayer(SceneFormat::Wide, source);
+        SceneTransform transform = document.layer(SceneFormat::Wide, layer)->transform;
+        transform.crop = QMarginsF(0.8, -0.2, 0.7, 2.0);
+
+        QVERIFY(document.setTransform(SceneFormat::Wide, layer, transform));
+        const QMarginsF crop = document.layer(SceneFormat::Wide, layer)->transform.crop;
+        QVERIFY(crop.left() >= 0.0);
+        QCOMPARE(crop.top(), 0.0);
+        QVERIFY(crop.left() + crop.right() <= 0.98);
+        QVERIFY(crop.top() + crop.bottom() <= 0.98);
+        QVERIFY(1.0 - crop.left() - crop.right() > 0.019);
+        QVERIFY(1.0 - crop.top() - crop.bottom() > 0.019);
+    }
 };
 
 QTEST_GUILESS_MAIN(SceneDocumentTest)

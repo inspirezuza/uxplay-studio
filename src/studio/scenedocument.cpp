@@ -3,6 +3,7 @@
 #include <QJsonArray>
 #include <QUuid>
 #include <algorithm>
+#include <cmath>
 
 namespace {
 
@@ -75,7 +76,8 @@ SceneLayer layerFromJson(const QJsonObject &json) {
     layer.locked = json.value(QStringLiteral("locked")).toBool(false);
     const auto transform = json.value(QStringLiteral("transform")).toObject();
     layer.transform.frame = rectFromJson(transform.value(QStringLiteral("frame")).toObject());
-    layer.transform.crop = marginsFromJson(transform.value(QStringLiteral("crop")).toObject());
+    layer.transform.crop = normalizedSceneCrop(
+        marginsFromJson(transform.value(QStringLiteral("crop")).toObject()));
     layer.transform.rotationDegrees = transform.value(QStringLiteral("rotationDegrees")).toDouble();
     layer.transform.opacity = transform.value(QStringLiteral("opacity")).toDouble(1.0);
     layer.transform.mask = maskFromKey(transform.value(QStringLiteral("mask")).toString());
@@ -207,6 +209,7 @@ bool SceneDocument::setTransform(SceneFormat format, const QString &layerId,
     if (!item || transform.frame.width() <= 0.0 || transform.frame.height() <= 0.0 ||
         transform.opacity < 0.0 || transform.opacity > 1.0) return false;
     item->transform = transform;
+    item->transform.crop = normalizedSceneCrop(transform.crop);
     return true;
 }
 
@@ -283,4 +286,25 @@ QString sceneMaskKey(SceneMask mask) {
     case SceneMask::Circle: return QStringLiteral("circle");
     }
     return QStringLiteral("none");
+}
+
+QMarginsF normalizedSceneCrop(const QMarginsF &crop) {
+    const auto finiteBound = [](qreal value) {
+        return std::isfinite(value) ? qBound<qreal>(0.0, value, 0.98) : 0.0;
+    };
+    qreal left = finiteBound(crop.left());
+    qreal top = finiteBound(crop.top());
+    qreal right = finiteBound(crop.right());
+    qreal bottom = finiteBound(crop.bottom());
+    const auto fitPair = [](qreal &first, qreal &second) {
+        const qreal sum = first + second;
+        if (sum > 0.98) {
+            const qreal scale = 0.98 / sum;
+            first *= scale;
+            second *= scale;
+        }
+    };
+    fitPair(left, right);
+    fitPair(top, bottom);
+    return {left, top, right, bottom};
 }

@@ -112,3 +112,4 @@ private:
 QString sceneFormatKey(SceneFormat format);
 QString sceneSourceTypeKey(SceneSourceType type);
 QString sceneMaskKey(SceneMask mask);
+QMarginsF normalizedSceneCrop(const QMarginsF &crop);

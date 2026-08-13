@@ -1,8 +1,12 @@
 #include "gstpipelinerunner.h"
 
 #include <gst/gst.h>
+#include <gst/app/gstappsink.h>
+#include <gst/video/video.h>
 
 #include <QElapsedTimer>
+#include <QImage>
+#include <QMutexLocker>
 
 GstPipelineRunner::GstPipelineRunner() {
     GError *error = nullptr;
@@ -11,6 +15,7 @@ GstPipelineRunner::GstPipelineRunner() {
 }
 
 GstPipelineRunner::~GstPipelineRunner() {
+    setTrackFirstMediaCallback({});
     QString ignored;
     stopAll(700, &ignored);
 }
@@ -26,6 +31,36 @@ bool GstPipelineRunner::startTrack(const QString &name, const QString &descripti
         return false;
     }
     if (parseError) g_error_free(parseError);
+    GstElement *origin = gst_bin_get_by_name(GST_BIN(pipeline), "studio-track-origin");
+    GstPad *originPad = origin ? gst_element_get_static_pad(origin, "src") : nullptr;
+    if (!origin || !originPad) {
+        if (error) *error = QStringLiteral("The %1 track has no timing observation point").arg(name);
+        if (originPad) gst_object_unref(originPad);
+        if (origin) gst_object_unref(origin);
+        gst_object_unref(pipeline);
+        return false;
+    }
+    auto *probe = new FirstMediaProbe{this, name};
+    const gulong probeId = gst_pad_add_probe(
+        originPad, GST_PAD_PROBE_TYPE_BUFFER, &GstPipelineRunner::observeFirstMedia,
+        probe, [](gpointer data) { delete static_cast<FirstMediaProbe *>(data); });
+    gst_object_unref(originPad);
+    gst_object_unref(origin);
+    if (probeId == 0) {
+        delete probe;
+        if (error) *error = QStringLiteral("Could not observe the %1 track timing").arg(name);
+        gst_object_unref(pipeline);
+        return false;
+    }
+    if (name == QStringLiteral("camera")) {
+        GstElement *preview = gst_bin_get_by_name(GST_BIN(pipeline), "studio-camera-preview");
+        if (preview) {
+            GstAppSinkCallbacks callbacks{};
+            callbacks.new_sample = &GstPipelineRunner::pullCameraSample;
+            gst_app_sink_set_callbacks(GST_APP_SINK(preview), &callbacks, this, nullptr);
+            gst_object_unref(preview);
+        }
+    }
     const GstStateChangeReturn result = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (result == GST_STATE_CHANGE_FAILURE) {
         if (error) *error = QStringLiteral("GStreamer rejected the %1 track").arg(name);
@@ -84,22 +119,53 @@ bool GstPipelineRunner::stopAll(int timeoutMs, QString *error) {
     return clean;
 }
 
-bool GstPipelineRunner::updateVideoCapture(const QRect &captureRect, QString *error) {
-    for (const Track &track : m_tracks) {
-        if (track.name != QStringLiteral("airplay-video")) continue;
-        GstElement *source = gst_bin_get_by_name(GST_BIN(track.pipeline), "studio-capture");
-        if (!source) {
-            if (error) *error = QStringLiteral("The AirPlay capture source is unavailable");
-            return false;
+void GstPipelineRunner::setCameraPreviewCallback(
+    std::function<void(const QImage &)> callback) {
+    QMutexLocker lock(&m_previewMutex);
+    m_cameraPreviewCallback = std::move(callback);
+}
+
+void GstPipelineRunner::setTrackFirstMediaCallback(
+    std::function<void(const QString &, qint64)> callback) {
+    QMutexLocker lock(&m_firstMediaMutex);
+    m_firstMediaCallback = std::move(callback);
+}
+
+GstPadProbeReturn GstPipelineRunner::observeFirstMedia(GstPad *, GstPadProbeInfo *info,
+                                                       gpointer context) {
+    auto *probe = static_cast<FirstMediaProbe *>(context);
+    if (!probe || !probe->runner || !(GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER))
+        return GST_PAD_PROBE_OK;
+    const qint64 observedAtNanoseconds = static_cast<qint64>(g_get_monotonic_time()) * 1000;
+    {
+        QMutexLocker lock(&probe->runner->m_firstMediaMutex);
+        if (probe->runner->m_firstMediaCallback) {
+            probe->runner->m_firstMediaCallback(probe->track, observedAtNanoseconds);
         }
-        g_object_set(source,
-                     "crop-x", static_cast<guint>(qMax(0, captureRect.x())),
-                     "crop-y", static_cast<guint>(qMax(0, captureRect.y())),
-                     "crop-width", static_cast<guint>(captureRect.width()),
-                     "crop-height", static_cast<guint>(captureRect.height()), nullptr);
-        gst_object_unref(source);
-        return true;
     }
-    if (error) *error = QStringLiteral("The AirPlay video track is not running");
-    return false;
+    return GST_PAD_PROBE_REMOVE;
+}
+
+GstFlowReturn GstPipelineRunner::pullCameraSample(GstAppSink *sink, gpointer context) {
+    auto *runner = static_cast<GstPipelineRunner *>(context);
+    GstSample *sample = gst_app_sink_pull_sample(sink);
+    if (!runner || !sample) return GST_FLOW_EOS;
+    QImage image;
+    GstVideoInfo info;
+    GstVideoFrame frame;
+    if (gst_video_info_from_caps(&info, gst_sample_get_caps(sample)) &&
+        gst_video_frame_map(&frame, &info, gst_sample_get_buffer(sample), GST_MAP_READ)) {
+        const auto *pixels = static_cast<const uchar *>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 0));
+        image = QImage(pixels, GST_VIDEO_FRAME_WIDTH(&frame), GST_VIDEO_FRAME_HEIGHT(&frame),
+                       GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0), QImage::Format_ARGB32).copy();
+        gst_video_frame_unmap(&frame);
+    }
+    gst_sample_unref(sample);
+    std::function<void(const QImage &)> callback;
+    {
+        QMutexLocker lock(&runner->m_previewMutex);
+        callback = runner->m_cameraPreviewCallback;
+    }
+    if (callback && !image.isNull()) callback(image);
+    return GST_FLOW_OK;
 }

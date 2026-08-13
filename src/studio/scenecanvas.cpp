@@ -306,7 +306,8 @@ void SceneCanvas::resetSelection() {
 void SceneCanvas::cropSelection(const QMarginsF &crop) {
     const auto before = selectedTransforms();
     auto after = before;
-    for (auto it = after.begin(); it != after.end(); ++it) it->crop = crop;
+    for (auto it = after.begin(); it != after.end(); ++it)
+        it->crop = normalizedSceneCrop(crop);
     pushTransforms(QStringLiteral("Crop layers"), before, after);
 }
 
@@ -499,11 +500,15 @@ void SceneCanvas::mouseMoveEvent(QMouseEvent *event) {
             QMarginsF crop = value.crop;
             const qreal dx = delta.x() / qMax<qreal>(1, value.frame.width());
             const qreal dy = delta.y() / qMax<qreal>(1, value.frame.height());
-            if (m_resizeEdges & EdgeLeft) crop.setLeft(qBound<qreal>(0, crop.left() + dx, .9));
-            if (m_resizeEdges & EdgeRight) crop.setRight(qBound<qreal>(0, crop.right() - dx, .9));
-            if (m_resizeEdges & EdgeTop) crop.setTop(qBound<qreal>(0, crop.top() + dy, .9));
-            if (m_resizeEdges & EdgeBottom) crop.setBottom(qBound<qreal>(0, crop.bottom() - dy, .9));
-            value.crop = crop;
+            if (m_resizeEdges & EdgeLeft)
+                crop.setLeft(qBound<qreal>(0, crop.left() + dx, .98 - crop.right()));
+            if (m_resizeEdges & EdgeRight)
+                crop.setRight(qBound<qreal>(0, crop.right() - dx, .98 - crop.left()));
+            if (m_resizeEdges & EdgeTop)
+                crop.setTop(qBound<qreal>(0, crop.top() + dy, .98 - crop.bottom()));
+            if (m_resizeEdges & EdgeBottom)
+                crop.setBottom(qBound<qreal>(0, crop.bottom() - dy, .98 - crop.top()));
+            value.crop = normalizedSceneCrop(crop);
         } else if (m_interaction == Interaction::Rotate) {
             const QPointF center = value.frame.center();
             value.rotationDegrees = qRadiansToDegrees(qAtan2(current.y() - center.y(),

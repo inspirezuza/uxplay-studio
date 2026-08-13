@@ -5,6 +5,8 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTemporaryDir>
 #include <QtTest>
 #include <gst/gst.h>
@@ -23,15 +25,18 @@ public:
         return !failed.contains(name);
     }
     bool stopAll(int, QString *) override { stopped = true; return true; }
-    bool updateVideoCapture(const QRect &captureRect, QString *) override {
-        updatedRect = captureRect;
-        return true;
+    void setTrackFirstMediaCallback(
+        std::function<void(const QString &, qint64)> callback) override {
+        firstMediaCallback = std::move(callback);
+    }
+    void observeFirstMedia(const QString &name, qint64 monotonicNanoseconds) {
+        if (firstMediaCallback) firstMediaCallback(name, monotonicNanoseconds);
     }
     QStringList names;
     QStringList pipelines;
     QStringList failed;
     bool stopped = false;
-    QRect updatedRect;
+    std::function<void(const QString &, qint64)> firstMediaCallback;
 };
 
 class RecordingSessionTest final : public QObject {
@@ -41,7 +46,14 @@ private slots:
         gst_init(nullptr, nullptr);
         uxplay_set_recording_test_mode(1);
     }
-    void cleanupTestCase() { uxplay_set_recording_test_mode(0); }
+    void cleanupTestCase() {
+        uxplay_set_recording_test_start_result(1);
+        uxplay_set_recording_test_mode(0);
+    }
+    void cleanup() {
+        uxplay_set_recording_test_start_result(1);
+        uxplay_set_recording_test_stop_result(1);
+    }
 
     void startsIndependentRecoverableTracksAndFinalizesProject() {
         QTemporaryDir temp;
@@ -53,7 +65,6 @@ private slots:
         FakePipelineRunner runner;
         RecordingSession session(&store, &runner);
         RecordingOptions options;
-        options.captureRect = QRect(10, 20, 1280, 720);
         options.camera = true;
         options.microphone = true;
         options.systemAudio = true;
@@ -65,6 +76,10 @@ private slots:
                                            QStringLiteral("microphone")}));
         for (const QString &description : runner.pipelines)
             QVERIFY(description.contains(QStringLiteral("%05d")));
+        const QString cameraDescription = runner.pipelines.at(runner.names.indexOf(
+            QStringLiteral("camera")));
+        QVERIFY(cameraDescription.contains(QStringLiteral("tee name=studio-camera-tee")));
+        QVERIFY(cameraDescription.contains(QStringLiteral("appsink name=studio-camera-preview")));
         for (const QString &description : runner.pipelines) {
             GError *error = nullptr;
             GstElement *pipeline = gst_parse_launch(description.toUtf8().constData(), &error);
@@ -75,13 +90,84 @@ private slots:
             if (pipeline) gst_object_unref(pipeline);
         }
         QVERIFY(QFile::exists(QDir(created.project.directory).filePath("session.json")));
+        QFile sessionFile(QDir(created.project.directory).filePath(QStringLiteral("session.json")));
+        QVERIFY(sessionFile.open(QIODevice::ReadOnly));
+        const QJsonObject sessionManifest = QJsonDocument::fromJson(sessionFile.readAll()).object();
+        const QJsonObject offsets = sessionManifest
+            .value(QStringLiteral("trackStartOffsetsNanoseconds")).toObject();
+        QVERIFY(offsets.isEmpty());
+        QCOMPARE(session.activeTracks().size(), 4);
+        QVERIFY(session.statusSummary().contains(QStringLiteral("4 independent tracks")));
         QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Recording);
-        QVERIFY(session.updateCaptureRect(0, QRect(20, 30, 960, 540)));
+        sessionFile.close();
 
         QVERIFY(session.stop());
         QVERIFY(runner.stopped);
         QCOMPARE(session.state(), RecordingState::Idle);
         QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Ready);
+    }
+
+    void persistsOffsetsFromFirstObservedMediaRatherThanStartCalls() {
+        QTemporaryDir temp;
+        ProjectStore store(temp.path());
+        SceneDocument scene;
+        const auto created = store.create(scene);
+        QVERIFY(created.ok());
+        FakePipelineRunner runner;
+        RecordingSession session(&store, &runner);
+        RecordingOptions options;
+        options.camera = true;
+        options.microphone = true;
+        options.systemAudio = true;
+        QVERIFY(session.start(created.project, options));
+
+        // Camera was requested after system audio, but its real first buffer arrived first.
+        runner.observeFirstMedia(QStringLiteral("camera"), 1'000'000'000);
+        runner.observeFirstMedia(QStringLiteral("airplay-video"), 1'120'000'000);
+        runner.observeFirstMedia(QStringLiteral("microphone"), 1'180'000'000);
+        runner.observeFirstMedia(QStringLiteral("airplay-audio"), 1'350'000'000);
+        runner.observeFirstMedia(QStringLiteral("camera"), 9'000'000'000);
+        const auto liveOffsets = [&created]() {
+            QFile file(QDir(created.project.directory).filePath(QStringLiteral("session.json")));
+            if (!file.open(QIODevice::ReadOnly)) return QJsonObject{};
+            return QJsonDocument::fromJson(file.readAll()).object()
+                .value(QStringLiteral("trackStartOffsetsNanoseconds")).toObject();
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(
+            liveOffsets().contains(QStringLiteral("airplay-video")), 1000);
+        QVERIFY(session.stop());
+
+        QFile sessionFile(QDir(created.project.directory).filePath(QStringLiteral("session.json")));
+        QVERIFY(sessionFile.open(QIODevice::ReadOnly));
+        const QJsonObject offsets = QJsonDocument::fromJson(sessionFile.readAll()).object()
+            .value(QStringLiteral("trackStartOffsetsNanoseconds")).toObject();
+        QCOMPARE(offsets.value(QStringLiteral("camera")).toDouble(), 0.0);
+        QCOMPARE(offsets.value(QStringLiteral("airplay-video")).toDouble(), 120'000'000.0);
+        QCOMPARE(offsets.value(QStringLiteral("microphone")).toDouble(), 180'000'000.0);
+        QCOMPARE(offsets.value(QStringLiteral("airplay-audio")).toDouble(), 350'000'000.0);
+        sessionFile.close();
+    }
+
+    void failedDirectTrackStartupLeavesTheEmptyProjectReady() {
+        QTemporaryDir temp;
+        ProjectStore store(temp.path());
+        SceneDocument scene;
+        const auto created = store.create(scene);
+        QVERIFY(created.ok());
+        FakePipelineRunner runner;
+        RecordingSession session(&store, &runner);
+
+        uxplay_set_recording_test_start_result(0);
+        QVERIFY(!session.start(created.project, {}));
+        uxplay_set_recording_test_start_result(1);
+        QCOMPARE(session.state(), RecordingState::Idle);
+        QVERIFY(session.lastError().contains(QStringLiteral("Could not start")));
+        QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Ready);
+
+        const auto next = store.create(scene);
+        QVERIFY(next.ok());
+        QVERIFY(session.start(next.project, {}));
+        QVERIFY(session.stop());
     }
 
     void directAirplayMuxRejectsEmptyFinalization() {
@@ -180,17 +266,19 @@ private slots:
         runner.failed = {QStringLiteral("camera")};
         RecordingSession session(&store, &runner);
         RecordingOptions options;
-        options.captureRect = QRect(0, 0, 640, 480);
         options.camera = true;
         QVERIFY(session.start(created.project, options));
         QVERIFY(session.warnings().join(' ').contains(QStringLiteral("camera")));
+        QVERIFY(session.statusSummary().contains(QStringLiteral("1 unavailable")));
+        QVERIFY(!session.statusSummary().contains(QStringLiteral("independent tracks")));
         QVERIFY(session.stop());
 
         const auto second = store.create(scene);
-        uxplay_set_recording_test_mode(0);
-        QVERIFY(!session.start(second.project, options));
-        QCOMPARE(store.load(second.project.directory).project.state, ProjectState::Failed);
-        uxplay_set_recording_test_mode(1);
+        uxplay_set_recording_test_start_result(0);
+        const bool started = session.start(second.project, options);
+        uxplay_set_recording_test_start_result(1);
+        QVERIFY(!started);
+        QCOMPARE(store.load(second.project.directory).project.state, ProjectState::Ready);
     }
 
     void failedAirplayFinalizationKeepsTheProjectRecoverable() {
@@ -201,7 +289,6 @@ private slots:
         FakePipelineRunner runner;
         RecordingSession session(&store, &runner);
         RecordingOptions options;
-        options.captureRect = QRect(0, 0, 640, 480);
         QVERIFY(session.start(created.project, options));
 
         uxplay_set_recording_test_stop_result(0);
@@ -211,7 +298,29 @@ private slots:
         QVERIFY(session.lastError().contains(QStringLiteral("AirPlay video track")));
         QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Recoverable);
     }
+
+    void runtimeAirplayFailureIsVisibleAndCannotFinalizeReady() {
+        QTemporaryDir temp;
+        ProjectStore store(temp.path());
+        SceneDocument scene;
+        const auto created = store.create(scene);
+        FakePipelineRunner runner;
+        RecordingSession session(&store, &runner);
+        RecordingOptions options;
+        QVERIFY(session.start(created.project, options));
+
+        session.markAirplayFailure(QStringLiteral("The recording queue overflowed"));
+        QVERIFY(session.statusSummary().contains(QStringLiteral("Recording issue")));
+        QVERIFY(!session.stop());
+        QCOMPARE(store.load(created.project.directory).project.state, ProjectState::Recoverable);
+
+        // The failed session must still close the direct mux so a new project can start.
+        const auto next = store.create(scene);
+        QVERIFY(next.ok());
+        QVERIFY2(session.start(next.project, options), qPrintable(session.lastError()));
+        QVERIFY(session.stop());
+    }
 };
 
-QTEST_APPLESS_MAIN(RecordingSessionTest)
+QTEST_GUILESS_MAIN(RecordingSessionTest)
 #include "test_recordingsession.moc"

@@ -14,14 +14,21 @@
 #include <functional>
 
 namespace {
-qint64 discoverTimelineDuration(const ProjectInfo &project, const std::function<bool()> &cancelled) {
+struct TimelineMetadata {
     qint64 durationNanoseconds = 0;
+    QSize airplayVideoSize;
+    QSize cameraVideoSize;
+};
+
+TimelineMetadata discoverTimelineMetadata(const ProjectInfo &project,
+                                          const std::function<bool()> &cancelled) {
+    TimelineMetadata metadata;
     QHash<QString, qint64> trackDurations;
     for (const QString &directory : {project.airplayDirectory(), project.presenterDirectory()}) {
-        if (cancelled()) return 0;
+        if (cancelled()) return {};
         QDirIterator files(directory, {QStringLiteral("*.mkv"), QStringLiteral("*.mka")}, QDir::Files);
         while (files.hasNext()) {
-            if (cancelled()) return 0;
+            if (cancelled()) return {};
             const QString path = files.next();
             GstDiscoverer *discoverer = gst_discoverer_new(3 * GST_SECOND, nullptr);
             if (!discoverer) continue;
@@ -29,19 +36,40 @@ qint64 discoverTimelineDuration(const ProjectInfo &project, const std::function<
             GError *error = nullptr;
             GstDiscovererInfo *info = gst_discoverer_discover_uri(discoverer, uri.constData(), &error);
             if (info) {
-                QString trackKey = QFileInfo(path).completeBaseName();
-                trackKey.remove(QRegularExpression(QStringLiteral("-\\d+$")));
-                trackKey = directory + QLatin1Char('/') + trackKey;
+                QString prefix = QFileInfo(path).completeBaseName();
+                prefix.remove(QRegularExpression(QStringLiteral("-\\d+$")));
+                QString trackKey = prefix;
+                if (directory == project.airplayDirectory()) {
+                    trackKey = prefix == QStringLiteral("video")
+                        ? QStringLiteral("airplay-video") : QStringLiteral("airplay-audio");
+                }
                 trackDurations[trackKey] += static_cast<qint64>(gst_discoverer_info_get_duration(info));
+                GList *videoStreams = gst_discoverer_info_get_video_streams(info);
+                if (videoStreams) {
+                    const auto *video = GST_DISCOVERER_VIDEO_INFO(videoStreams->data);
+                    const QSize size(static_cast<int>(gst_discoverer_video_info_get_width(video)),
+                                     static_cast<int>(gst_discoverer_video_info_get_height(video)));
+                    const QString prefix = QFileInfo(path).completeBaseName()
+                        .remove(QRegularExpression(QStringLiteral("-\\d+$")));
+                    if (size.isValid() && directory == project.airplayDirectory() &&
+                        prefix == QStringLiteral("video") && !metadata.airplayVideoSize.isValid()) {
+                        metadata.airplayVideoSize = size;
+                    } else if (size.isValid() && directory == project.presenterDirectory() &&
+                               prefix == QStringLiteral("camera") && !metadata.cameraVideoSize.isValid()) {
+                        metadata.cameraVideoSize = size;
+                    }
+                    gst_discoverer_stream_info_list_free(videoStreams);
+                }
                 gst_discoverer_info_unref(info);
             }
             if (error) g_error_free(error);
             gst_object_unref(discoverer);
-            if (cancelled()) return 0;
+            if (cancelled()) return {};
         }
     }
-    for (qint64 duration : trackDurations) durationNanoseconds = qMax(durationNanoseconds, duration);
-    return durationNanoseconds;
+    metadata.durationNanoseconds = ExportPipeline::alignedTimelineDuration(
+        trackDurations, ExportPipeline::trackStartOffsets(project));
+    return metadata;
 }
 
 void roundedRectangle(cairo_t *context, double width, double height, double radius) {
@@ -69,10 +97,13 @@ void drawMask(GstElement *overlay, cairo_t *context, guint64, guint64, gpointer 
     cairo_set_fill_rule(context, CAIRO_FILL_RULE_EVEN_ODD);
     cairo_rectangle(context, 0, 0, width, height);
     if (GPOINTER_TO_INT(data) == static_cast<int>(SceneMask::Circle)) {
-        const double radius = qMin(width, height) / 2.0;
-        cairo_arc(context, width / 2.0, height / 2.0, radius, 0, 2 * 3.14159265358979323846);
+        cairo_save(context);
+        cairo_translate(context, width / 2.0, height / 2.0);
+        cairo_scale(context, width / 2.0, height / 2.0);
+        cairo_arc(context, 0, 0, 1.0, 0, 2 * 3.14159265358979323846);
+        cairo_restore(context);
     } else {
-        roundedRectangle(context, width, height, qMin(width, height) * .09);
+        roundedRectangle(context, width, height, qMin(36.0, qMin(width, height) / 2.0));
     }
     cairo_fill(context);
     cairo_restore(context);
@@ -105,6 +136,17 @@ bool ExportJob::isRunning() const { return m_thread && m_thread->isRunning(); }
 bool ExportJob::start(const ProjectInfo &project, const SceneDocument &scene,
                       SceneFormat format, const QString &outputPath) {
     if (isRunning() || !m_store) return false;
+    const ProjectLoadResult persisted = m_store->load(project.directory);
+    if (!persisted.ok()) {
+        emit failed(persisted.error);
+        return false;
+    }
+    if (persisted.project.state != ProjectState::Ready) {
+        emit failed(persisted.project.state == ProjectState::Recoverable
+            ? QStringLiteral("Recover this project before export")
+            : QStringLiteral("The project must be Ready before export"));
+        return false;
+    }
     const QString stateError = m_store->setState(project.directory, ProjectState::Exporting);
     if (!stateError.isEmpty()) {
         emit failed(stateError);
@@ -113,32 +155,47 @@ bool ExportJob::start(const ProjectInfo &project, const SceneDocument &scene,
     emit started(outputPath);
     const QJsonObject sceneSnapshot = scene.toJson();
     m_thread = QThread::create([this, project, outputPath, sceneSnapshot, format]() {
+        const QString temporaryOutput = outputPath + QStringLiteral(".partial");
+        QFile::remove(temporaryOutput);
+        const auto restoreReadyAfterFailure = [this, &project, &temporaryOutput](QString error) {
+            QFile::remove(temporaryOutput);
+            const QString stateError = m_store->setState(project.directory, ProjectState::Ready);
+            if (!stateError.isEmpty()) {
+                error += QStringLiteral("; project state could not be restored: %1").arg(stateError);
+            }
+            emit failed(error);
+        };
         GError *initError = nullptr;
         if (!gst_is_initialized()) gst_init_check(nullptr, nullptr, &initError);
         if (initError) {
             const QString error = QString::fromUtf8(initError->message);
             g_error_free(initError);
-            m_store->setState(project.directory, ProjectState::Failed);
-            emit failed(error);
+            restoreReadyAfterFailure(error);
             return;
         }
         auto sceneResult = SceneDocument::fromJson(sceneSnapshot);
         if (!sceneResult.has_value()) {
-            m_store->setState(project.directory, ProjectState::Failed);
-            emit failed(sceneResult.error);
+            restoreReadyAfterFailure(sceneResult.error);
             return;
         }
         const auto cancelled = []() { return QThread::currentThread()->isInterruptionRequested(); };
-        const qint64 durationNanoseconds = discoverTimelineDuration(project, cancelled);
+        const TimelineMetadata timeline = discoverTimelineMetadata(project, cancelled);
         if (cancelled()) {
             m_store->setState(project.directory, ProjectState::Ready);
             return;
         }
+        QHash<QString, QSize> sourcePixelSizes;
+        for (const SceneSource &source : sceneResult.document->sources()) {
+            if (source.type == SceneSourceType::AirPlay && timeline.airplayVideoSize.isValid())
+                sourcePixelSizes.insert(source.id, timeline.airplayVideoSize);
+            else if (source.type == SceneSourceType::Camera && timeline.cameraVideoSize.isValid())
+                sourcePixelSizes.insert(source.id, timeline.cameraVideoSize);
+        }
         const auto built = ExportPipeline::build(project, *sceneResult.document, format,
-                                                  outputPath, durationNanoseconds);
+                                                  temporaryOutput, timeline.durationNanoseconds,
+                                                  sourcePixelSizes);
         if (!built.ok()) {
-            m_store->setState(project.directory, ProjectState::Failed);
-            emit failed(built.error);
+            restoreReadyAfterFailure(built.error);
             return;
         }
         if (cancelled()) {
@@ -153,8 +210,7 @@ bool ExportJob::start(const ProjectInfo &project, const SceneDocument &scene,
                                              : QStringLiteral("Could not create export pipeline");
             if (parseError) g_error_free(parseError);
             if (pipeline) gst_object_unref(pipeline);
-            m_store->setState(project.directory, ProjectState::Failed);
-            emit failed(error);
+            restoreReadyAfterFailure(error);
             return;
         }
         GstBus *bus = gst_element_get_bus(pipeline);
@@ -188,9 +244,19 @@ bool ExportJob::start(const ProjectInfo &project, const SceneDocument &scene,
         gst_element_set_state(pipeline, GST_STATE_NULL);
         gst_object_unref(bus);
         gst_object_unref(pipeline);
-        m_store->setState(project.directory, success ? ProjectState::Ready : ProjectState::Failed);
-        if (success) emit finished(outputPath);
-        else emit failed(error.isEmpty() ? QStringLiteral("Export stopped before completion") : error);
+        if (success) {
+            if (QFileInfo::exists(outputPath) || !QFile::rename(temporaryOutput, outputPath)) {
+                restoreReadyAfterFailure(QStringLiteral(
+                    "The completed export could not be moved into place"));
+                return;
+            }
+            const QString stateError = m_store->setState(project.directory, ProjectState::Ready);
+            if (stateError.isEmpty()) emit finished(outputPath);
+            else restoreReadyAfterFailure(stateError);
+        } else {
+            restoreReadyAfterFailure(error.isEmpty()
+                ? QStringLiteral("Export stopped before completion") : error);
+        }
     });
     connect(m_thread, &QThread::finished, m_thread, &QObject::deleteLater);
     connect(m_thread, &QThread::finished, this, [this]() { m_thread = nullptr; });

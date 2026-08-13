@@ -68,6 +68,11 @@ private slots:
         canvas.cropSelection(QMarginsF(0.1, 0.2, 0.1, 0.0));
         QCOMPARE(document.layer(SceneFormat::Vertical, layer)->transform.crop,
                  QMarginsF(0.1, 0.2, 0.1, 0.0));
+
+        canvas.cropSelection(QMarginsF(0.8, 0.9, 0.8, 0.9));
+        const QMarginsF normalized = document.layer(SceneFormat::Vertical, layer)->transform.crop;
+        QVERIFY(normalized.left() + normalized.right() <= 0.98);
+        QVERIFY(normalized.top() + normalized.bottom() <= 0.98);
     }
 };
 

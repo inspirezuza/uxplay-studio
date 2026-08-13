@@ -2,12 +2,17 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMutexLocker>
 #include <QSaveFile>
+#include <QUrl>
 #include <QUuid>
 #include <algorithm>
+#include <mutex>
+#include <gst/gst.h>
+#include <gst/pbutils/pbutils.h>
 
 namespace {
 
@@ -22,6 +27,38 @@ ProjectState projectStateFromKey(const QString &key) {
 
 ProjectSummary summaryOf(const ProjectInfo &info) {
     return {info.id, info.title, info.directory, info.state, info.updatedAtUtc};
+}
+
+bool hasUsableMatroskaStream(const QString &path, bool expectVideo) {
+    static std::once_flag initializeGStreamer;
+    std::call_once(initializeGStreamer, []() { gst_init(nullptr, nullptr); });
+
+    GError *error = nullptr;
+    GstDiscoverer *discoverer = gst_discoverer_new(2 * GST_SECOND, &error);
+    if (!discoverer) {
+        if (error) g_error_free(error);
+        return false;
+    }
+    const QByteArray uri = QUrl::fromLocalFile(path).toEncoded(QUrl::FullyEncoded);
+    GstDiscovererInfo *info = gst_discoverer_discover_uri(discoverer, uri.constData(), &error);
+    bool usable = false;
+    if (info && gst_discoverer_info_get_result(info) == GST_DISCOVERER_OK) {
+        GList *streams = expectVideo ? gst_discoverer_info_get_video_streams(info)
+                                     : gst_discoverer_info_get_audio_streams(info);
+        usable = streams != nullptr;
+        gst_discoverer_stream_info_list_free(streams);
+    }
+    if (info) gst_discoverer_info_unref(info);
+    if (error) g_error_free(error);
+    gst_object_unref(discoverer);
+    return usable;
+}
+
+QString quarantinePath(const QString &path) {
+    QString candidate = path + QStringLiteral(".incomplete");
+    for (int suffix = 2; QFileInfo::exists(candidate); ++suffix)
+        candidate = path + QStringLiteral(".incomplete-%1").arg(suffix);
+    return candidate;
 }
 
 } // namespace
@@ -116,6 +153,61 @@ QString ProjectStore::setState(const QString &directory, ProjectState state) {
     return writeManifest(loaded.project, *loaded.document);
 }
 
+ProjectRecoveryResult ProjectStore::recover(const QString &directory,
+                                            const std::function<bool()> &cancelled) {
+    QMutexLocker lock(&m_manifestMutex);
+    if (cancelled && cancelled()) return {0, 0, QStringLiteral("Recovery check cancelled")};
+    auto loaded = loadUnlocked(directory);
+    if (!loaded.ok()) return {0, 0, loaded.error};
+    if (loaded.project.state != ProjectState::Recoverable) {
+        return {0, 0, QStringLiteral("Only an interrupted Recoverable project can be recovered")};
+    }
+
+    ProjectRecoveryResult result;
+    bool hasAirplayVideo = false;
+    const QList<QPair<QString, QStringList>> mediaLocations {
+        {loaded.project.airplayDirectory(),
+         {QStringLiteral("video-*.mkv"), QStringLiteral("audio-*.mka")}},
+        {loaded.project.presenterDirectory(),
+         {QStringLiteral("camera-*.mkv"), QStringLiteral("microphone-*.mka")}}
+    };
+    for (const auto &location : mediaLocations) {
+        QDir mediaDirectory(location.first);
+        const QStringList files = mediaDirectory.entryList(location.second, QDir::Files, QDir::Name);
+        for (const QString &name : files) {
+            if (cancelled && cancelled()) {
+                result.error = QStringLiteral("Recovery check cancelled; the project remains Recoverable");
+                return result;
+            }
+            const QString path = mediaDirectory.filePath(name);
+            const bool videoFragment = name.endsWith(QStringLiteral(".mkv"), Qt::CaseInsensitive);
+            if (hasUsableMatroskaStream(path, videoFragment)) {
+                ++result.usableMediaFiles;
+                if (location.first == loaded.project.airplayDirectory()
+                    && name.startsWith(QStringLiteral("video-"))) {
+                    hasAirplayVideo = true;
+                }
+                continue;
+            }
+            if (!QFile::rename(path, quarantinePath(path))) {
+                result.error = QStringLiteral("Could not preserve an incomplete media fragment: %1")
+                    .arg(name);
+                return result;
+            }
+            ++result.quarantinedMediaFiles;
+        }
+    }
+    if (!hasAirplayVideo) {
+        result.error = QStringLiteral("No usable AirPlay video fragment was found; the project remains Recoverable");
+        return result;
+    }
+
+    loaded.project.state = ProjectState::Ready;
+    loaded.project.updatedAtUtc = QDateTime::currentDateTimeUtc();
+    result.error = writeManifest(loaded.project, *loaded.document);
+    return result;
+}
+
 QList<ProjectSummary> ProjectStore::projects() const {
     QList<ProjectSummary> result;
     QDir root(m_rootDirectory);
@@ -138,9 +230,17 @@ QList<ProjectSummary> ProjectStore::recoverableProjects() {
     for (const QString &name : root.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         auto loaded = loadUnlocked(root.filePath(name));
         if (!loaded.ok()) continue;
-        if (loaded.project.state == ProjectState::Recording ||
-            loaded.project.state == ProjectState::Finalizing ||
-            loaded.project.state == ProjectState::Exporting) {
+        if (loaded.project.state == ProjectState::Exporting) {
+            loaded.project.state = ProjectState::Ready;
+            loaded.project.updatedAtUtc = QDateTime::currentDateTimeUtc();
+            if (!writeManifest(loaded.project, *loaded.document).isEmpty()) continue;
+            QDir exports(loaded.project.exportsDirectory());
+            for (const QString &partial : exports.entryList(
+                     {QStringLiteral("*.partial")}, QDir::Files)) {
+                exports.remove(partial);
+            }
+        } else if (loaded.project.state == ProjectState::Recording ||
+                   loaded.project.state == ProjectState::Finalizing) {
             loaded.project.state = ProjectState::Recoverable;
             loaded.project.updatedAtUtc = QDateTime::currentDateTimeUtc();
             if (!writeManifest(loaded.project, *loaded.document).isEmpty()) continue;

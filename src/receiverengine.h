@@ -6,6 +6,7 @@
 
 #include <QObject>
 #include <QPointer>
+#include <functional>
 
 class QImage;
 
@@ -13,7 +14,11 @@ class ReceiverEngine final : public QObject {
     Q_OBJECT
 
 public:
+    using WorkerFactory = std::function<AirPlayWorker *()>;
+
     explicit ReceiverEngine(QObject *parent = nullptr);
+    ReceiverEngine(WorkerFactory workerFactory, int shutdownWaitMs,
+                   QObject *parent = nullptr);
     ~ReceiverEngine() override;
 
     ReceiverState state() const;
@@ -36,6 +41,8 @@ private:
     void transitionTo(ReceiverState next);
 
     QPointer<AirPlayWorker> m_worker;
+    WorkerFactory m_workerFactory;
+    int m_shutdownWaitMs = 3000;
     ReceiverStateMachine m_stateMachine;
     ReceiverConfig m_config;
     quintptr m_videoWindow = 0;

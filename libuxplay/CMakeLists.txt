@@ -60,9 +60,9 @@ if  ( GST_MACOS )
 endif()
 
 add_library( uxplay uxplay.cpp )
-target_link_libraries( uxplay renderers airplay )
+target_link_libraries( uxplay PUBLIC renderers airplay )
 if (DBUS_FOUND)
-      target_link_libraries( uxplay ${DBUS_LIBRARY})
+      target_link_libraries( uxplay PRIVATE ${DBUS_LIBRARY})
 endif()
 
 install( TARGETS  uxplay RUNTIME DESTINATION bin )

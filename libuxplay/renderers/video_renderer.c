@@ -100,6 +100,7 @@ struct video_renderer_s {
 
 static video_renderer_t *renderer = NULL;
 static video_renderer_t *renderer_type[NCODECS] = {0};
+static bool test_fail_next_playing_transition = false;
 static int n_renderers = NCODECS;
 static char h264[] = "h264";
 static char h265[] = "h265";
@@ -113,6 +114,10 @@ void video_renderer_set_window_handle(uintptr_t window_handle) {
 void video_renderer_set_preview_sample_callback(void (*callback)(GstSample *, void *), void *context) {
     preview_sample_callback = callback;
     preview_sample_context = context;
+}
+
+void video_renderer_test_fail_next_playing_transition(void) {
+    test_fail_next_playing_transition = true;
 }
 
 static GstFlowReturn preview_new_sample(GstAppSink *sink, gpointer user_data) {
@@ -1210,10 +1215,21 @@ int video_renderer_choose_codec (bool video_is_jpeg, bool video_is_h265) {
         return -1;
     }
     renderer = renderer_used;
-    gst_element_set_state (renderer->pipeline, GST_STATE_PLAYING);
-    GstState old_state, new_state;
-    if (gst_element_get_state(renderer->pipeline, &old_state, &new_state, 100 * GST_MSECOND) == GST_STATE_CHANGE_FAILURE) {
-        g_error("video pipeline failed to go into playing state");
+    const GstStateChangeReturn playing_result = test_fail_next_playing_transition
+        ? GST_STATE_CHANGE_FAILURE
+        : gst_element_set_state(renderer->pipeline, GST_STATE_PLAYING);
+    test_fail_next_playing_transition = false;
+    GstState old_state = GST_STATE_NULL;
+    GstState new_state = GST_STATE_VOID_PENDING;
+    const GstStateChangeReturn state_result = playing_result == GST_STATE_CHANGE_FAILURE
+        ? GST_STATE_CHANGE_FAILURE
+        : gst_element_get_state(renderer->pipeline, &old_state, &new_state,
+                                100 * GST_MSECOND);
+    if (state_result == GST_STATE_CHANGE_FAILURE) {
+        logger_log(logger, LOGGER_ERR,
+                   "Video pipeline failed to enter PLAYING state; requesting receiver recovery");
+        gst_element_set_state(renderer->pipeline, GST_STATE_NULL);
+        renderer = NULL;
         return -1;
     }
     logger_log(logger, LOGGER_DEBUG, "video_pipeline state change from %s to %s\n",

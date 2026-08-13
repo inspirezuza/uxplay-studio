@@ -29,15 +29,27 @@ typedef struct uxplay_event {
 typedef void (*uxplay_event_callback)(const uxplay_event *event, void *context);
 typedef void (*uxplay_preview_callback)(const unsigned char *data, int width, int height,
                                         int stride, void *context);
+typedef void (*uxplay_recording_first_media_callback)(int64_t monotonic_nanoseconds,
+                                                       void *context);
+
+typedef enum uxplay_recording_status {
+    UXPLAY_RECORDING_INACTIVE = 0,
+    UXPLAY_RECORDING_ACTIVE = 1,
+    UXPLAY_RECORDING_FAILED = 2
+} uxplay_recording_status;
 
 int start_uxplay(int argc, char *argv[]);
 void stop_uxplay();
 void uxplay_set_video_window(uintptr_t window_handle);
 void uxplay_set_event_callback(uxplay_event_callback callback, void *context);
 void uxplay_set_preview_callback(uxplay_preview_callback callback, void *context);
+void uxplay_set_recording_first_media_callback(uxplay_recording_first_media_callback callback,
+                                                void *context);
 int uxplay_start_recording(const char *directory);
 int uxplay_stop_recording();
+uxplay_recording_status uxplay_get_recording_status(void);
 void uxplay_set_recording_test_mode(int enabled);
+void uxplay_set_recording_test_start_result(int allowed);
 void uxplay_set_recording_test_stop_result(int clean);
 
 #ifdef __cplusplus

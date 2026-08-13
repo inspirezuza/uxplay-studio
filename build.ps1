@@ -80,6 +80,30 @@ function Invoke-Native {
     }
 }
 
+function Remove-PathWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LiteralPath,
+
+        [int]$Attempts = 10,
+
+        [int]$DelayMilliseconds = 500
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $LiteralPath -Recurse -Force -ErrorAction Stop
+            return
+        }
+        catch {
+            if ($attempt -eq $Attempts) {
+                throw
+            }
+            Start-Sleep -Milliseconds $DelayMilliseconds
+        }
+    }
+}
+
 function Assert-Msys2 {
     $pacman = Join-Path $MsysRoot "usr\bin\pacman.exe"
     if (-not (Test-Path -LiteralPath $pacman)) {
@@ -382,7 +406,7 @@ function Write-BuildManifest {
 function Stage-Runtime {
     Set-BuildEnvironment
     if (Test-Path -LiteralPath $stageDir) {
-        Remove-Item -LiteralPath $stageDir -Recurse -Force
+        Remove-PathWithRetry -LiteralPath $stageDir
     }
 
     New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
@@ -636,7 +660,7 @@ function Clear-BuildOutputs {
         if ($resolved -notin $allowedRoots) {
             throw "Refusing to remove unexpected path: $resolved"
         }
-        Remove-Item -LiteralPath $resolved -Recurse -Force
+        Remove-PathWithRetry -LiteralPath $resolved
     }
 }
 

@@ -71,6 +71,81 @@ function Get-StableFileHash {
     throw "Could not hash bundle file '$Path'"
 }
 
+function Invoke-ObjdumpWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BinaryPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ObjdumpPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RuntimeBin,
+
+        [hashtable]$RuntimeAliases = @{}
+    )
+
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        if (-not (Test-Path -LiteralPath $BinaryPath -PathType Leaf)) {
+            $fallbackName = [IO.Path]::GetFileName($BinaryPath)
+            $fallbackPath = Join-Path $RuntimeBin $fallbackName
+            if (
+                -not (Test-Path -LiteralPath $fallbackPath) -and
+                $RuntimeAliases.ContainsKey($fallbackName)
+            ) {
+                $fallbackPath = Join-Path $RuntimeBin $RuntimeAliases[$fallbackName]
+            }
+
+            if (Test-Path -LiteralPath $fallbackPath -PathType Leaf) {
+                Copy-BundleDependencyWithRetry -SourcePath $fallbackPath `
+                    -DestinationPath $BinaryPath
+            }
+
+            if ($attempt -eq 10) {
+                throw "Queued bundle binary disappeared before dependency inspection: $BinaryPath"
+            }
+            Start-Sleep -Milliseconds (100 * $attempt)
+            continue
+        }
+
+        $output = & $ObjdumpPath -p $BinaryPath 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            return $output
+        }
+
+        if ($attempt -eq 10) {
+            throw "objdump failed for $BinaryPath`n$($output -join [Environment]::NewLine)"
+        }
+        Start-Sleep -Milliseconds (100 * $attempt)
+    }
+
+    throw "objdump did not produce a stable result for $BinaryPath"
+}
+
+function Copy-BundleDependencyWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationPath
+    )
+
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        try {
+            Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -eq 10) {
+                throw
+            }
+            Start-Sleep -Milliseconds (100 * $attempt)
+        }
+    }
+
+    throw "Could not copy bundle dependency '$SourcePath' to '$DestinationPath'"
+}
+
 $stage = (Resolve-Path -LiteralPath $StageDir).Path
 $runtimeBin = Join-Path $MsysRoot "$EnvironmentName\bin"
 $objdump = Join-Path $runtimeBin "objdump.exe"
@@ -117,10 +192,8 @@ while ($queue.Count -gt 0) {
         continue
     }
 
-    $output = & $objdump -p $binary 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "objdump failed for $binary`n$($output -join [Environment]::NewLine)"
-    }
+    $output = Invoke-ObjdumpWithRetry -BinaryPath $binary -ObjdumpPath $objdump `
+        -RuntimeBin $runtimeBin -RuntimeAliases $runtimeAliases
 
     $imports = foreach ($line in $output) {
         if ($line -match "DLL Name:\s*(.+)$") {
@@ -162,7 +235,8 @@ while ($queue.Count -gt 0) {
 
             $destination = Join-Path $stage $import
             if (-not (Test-Path -LiteralPath $destination)) {
-                Copy-Item -LiteralPath $runtimeDependency -Destination $destination
+                Copy-BundleDependencyWithRetry -SourcePath $runtimeDependency `
+                    -DestinationPath $destination
                 $copied++
             }
             $queue.Enqueue((Resolve-Path -LiteralPath $destination).Path)

@@ -2,6 +2,8 @@
 appsrc
 appsink
 queue
+tee
+identity
 filesink
 fakesink
 typefind
@@ -45,6 +47,7 @@ videotestsrc
 videorate
 videoflip
 videocrop
+videobox
 rotate
 cairooverlay
 mp4mux

@@ -14,8 +14,6 @@ class QCheckBox;
 class QComboBox;
 class QCloseEvent;
 class QKeyEvent;
-class QMoveEvent;
-class QResizeEvent;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -37,6 +35,8 @@ class ProjectStore;
 class GstPipelineRunner;
 class RecordingSession;
 class ExportJob;
+class CameraPreviewEngine;
+class CameraSelfView;
 struct ProjectInfo;
 struct ReceiverEvent;
 
@@ -51,8 +51,6 @@ public:
 protected:
     void closeEvent(QCloseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
-    void moveEvent(QMoveEvent *event) override;
-    void resizeEvent(QResizeEvent *event) override;
 
 private:
     void setupUi();
@@ -69,11 +67,13 @@ private:
     void addStudioSource(int type);
     void refreshLayerList();
     void refreshProjectList();
+    bool openProjectDirectory(const QString &directory);
     void toggleRecording();
     void exportCurrentProject();
     void saveCurrentProject();
-    void refreshRecordingCapture();
     void loadRecordedPreviews(const ProjectInfo &project);
+    void setCameraPreviewEnabled(bool enabled);
+    void handleCameraPreviewFrame(const QImage &frame);
 
     void startReceiver();
     void stopReceiver();
@@ -158,6 +158,8 @@ private:
     std::unique_ptr<SceneDocument> m_sceneDocument;
     std::unique_ptr<ProjectStore> m_projectStore;
     std::unique_ptr<GstPipelineRunner> m_pipelineRunner;
+    CameraPreviewEngine *m_cameraPreviewEngine = nullptr;
+    CameraSelfView *m_cameraSelfView = nullptr;
     RecordingSession *m_recordingSession = nullptr;
     ExportJob *m_exportJob = nullptr;
     std::unique_ptr<ProjectInfo> m_currentProject;
@@ -166,6 +168,8 @@ private:
     QListWidget *m_sourceList = nullptr;
     QListWidget *m_layerList = nullptr;
     QListWidget *m_projectList = nullptr;
+    QLabel *m_projectFeedback = nullptr;
+    QPushButton *m_recoverProjectButton = nullptr;
     QLabel *m_recordingStatus = nullptr;
     QPushButton *m_recordButton = nullptr;
     QPushButton *m_liveModeButton = nullptr;

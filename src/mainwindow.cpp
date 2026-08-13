@@ -5,15 +5,18 @@
 #include "networkdiagnostics.h"
 #include "projects/projectstore.h"
 #include "recording/gstpipelinerunner.h"
+#include "recording/camerapreviewengine.h"
 #include "recording/recordingsession.h"
 #include "receiverengine.h"
 #include "export/exportjob.h"
 #include "studio/scenecanvas.h"
+#include "studio/cameraselfview.h"
 #include "studio/scenedocument.h"
 #include "videosurface.h"
 #include "uxplay_api.h"
 
 #include <QAction>
+#include <QAbstractItemModel>
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -37,13 +40,11 @@
 #include <QInputDialog>
 #include <QMenu>
 #include <QMessageBox>
-#include <QMoveEvent>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
-#include <QResizeEvent>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSettings>
@@ -162,6 +163,13 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart, const QString &projectRo
     m_projectStore = std::make_unique<ProjectStore>(projectRoot);
     m_projectStore->recoverableProjects();
     m_pipelineRunner = std::make_unique<GstPipelineRunner>();
+    m_cameraPreviewEngine = new CameraPreviewEngine(this);
+    connect(m_cameraPreviewEngine, &CameraPreviewEngine::frameReady,
+            this, &MainWindow::handleCameraPreviewFrame);
+    m_pipelineRunner->setCameraPreviewCallback([this](const QImage &frame) {
+        QMetaObject::invokeMethod(this, [this, frame]() { handleCameraPreviewFrame(frame); },
+                                  Qt::QueuedConnection);
+    });
     m_recordingSession = new RecordingSession(m_projectStore.get(), m_pipelineRunner.get(), this);
     m_exportJob = new ExportJob(m_projectStore.get(), this);
 
@@ -176,16 +184,22 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart, const QString &projectRo
         m_recordButton->setText(active ? QStringLiteral("Stop recording") : QStringLiteral("Record"));
         m_recordButton->setProperty("recording", active);
         refreshStyle(m_recordButton);
-        m_recordingStatus->setText(state == RecordingState::Recording ? QStringLiteral("● REC · independent tracks") :
-                                   state == RecordingState::Finalizing ? QStringLiteral("Finalizing media safely…") :
-                                   state == RecordingState::Failed ? QStringLiteral("Recording needs attention") :
-                                   QStringLiteral("Ready to record"));
+        m_recordingStatus->setText(m_recordingSession->statusSummary());
         refreshProjectList();
+        if (state == RecordingState::Starting && m_recordCamera && m_recordCamera->isChecked())
+            m_cameraPreviewEngine->stop();
+        if ((state == RecordingState::Idle || state == RecordingState::Failed) &&
+            m_recordCamera && m_recordCamera->isChecked())
+            setCameraPreviewEnabled(true);
         if (state == RecordingState::Idle && m_currentProject)
             loadRecordedPreviews(*m_currentProject);
     });
     connect(m_recordingSession, &RecordingSession::warningRaised, this,
-            [this](const QString &message) { appendActivity(QStringLiteral("Recording"), message); });
+            [this](const QString &message) {
+        appendActivity(QStringLiteral("Recording"), message);
+        if (message.contains(QStringLiteral("camera"), Qt::CaseInsensitive) && m_cameraSelfView)
+            m_cameraSelfView->setActive(false);
+    });
     connect(m_exportJob, &ExportJob::started, this, [this](const QString &) {
         if (m_recordingStatus) m_recordingStatus->setText(QStringLiteral("Exporting in background…"));
     });
@@ -230,11 +244,15 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart, const QString &projectRo
 
 MainWindow::~MainWindow() {
     m_quitting = true;
+    if (m_cameraPreviewEngine) m_cameraPreviewEngine->stop();
     if (m_cursorOverride) {
         QApplication::restoreOverrideCursor();
         m_cursorOverride = false;
     }
     stopBluetoothBeacon();
+    for (QThread *thread : std::as_const(m_previewThreads)) {
+        if (thread && thread->isRunning()) thread->requestInterruption();
+    }
     for (QThread *thread : std::as_const(m_previewThreads)) {
         if (thread && thread->isRunning()) thread->wait();
     }
@@ -399,6 +417,8 @@ void MainWindow::addStudioSource(int type) {
         verticalTransform.frame = QRectF(680, 1480, 320, 320);
         verticalTransform.mask = SceneMask::Circle;
         m_sceneDocument->setTransform(SceneFormat::Vertical, vertical, verticalTransform);
+        m_recordCamera->setChecked(true);
+        setCameraPreviewEnabled(true);
     }
     m_sceneCanvas->setDocument(m_sceneDocument.get(), static_cast<SceneFormat>(m_sceneFormat));
     refreshLayerList();
@@ -442,6 +462,7 @@ void MainWindow::refreshProjectList() {
     if (!m_projectList || !m_projectStore) return;
     QSignalBlocker blocker(m_projectList);
     m_projectList->clear();
+    if (m_recoverProjectButton) m_recoverProjectButton->setEnabled(false);
     const auto projects = m_projectStore->projects();
     for (const ProjectSummary &project : projects) {
         const QString state = projectStateKey(project.state).toUpper();
@@ -453,6 +474,54 @@ void MainWindow::refreshProjectList() {
         item->setSizeHint(QSize(0, 58));
         if (project.state == ProjectState::Recoverable) item->setForeground(QColor(QStringLiteral("#f6c85f")));
     }
+}
+
+void MainWindow::setCameraPreviewEnabled(bool enabled) {
+    if (!m_cameraPreviewEngine || !m_cameraSelfView) return;
+    const bool recording = m_recordingSession &&
+        (m_recordingSession->state() == RecordingState::Starting ||
+         m_recordingSession->state() == RecordingState::Recording ||
+         m_recordingSession->state() == RecordingState::Finalizing);
+    if (!enabled) {
+        if (!recording) m_cameraPreviewEngine->stop();
+        m_cameraSelfView->setActive(false);
+        return;
+    }
+    m_cameraSelfView->setActive(true);
+    if (recording || m_cameraPreviewEngine->isRunning()) return;
+    QString error;
+    if (!m_cameraPreviewEngine->start(&error)) {
+        m_cameraSelfView->setActive(false);
+        if (m_recordingStatus) m_recordingStatus->setText(QStringLiteral("Camera preview unavailable · %1").arg(error));
+        appendActivity(QStringLiteral("Camera"), error);
+    }
+}
+
+void MainWindow::handleCameraPreviewFrame(const QImage &frame) {
+    if (frame.isNull() || !m_sceneDocument) return;
+    if (m_cameraSelfView) m_cameraSelfView->setFrame(frame);
+    if (!m_sceneCanvas) return;
+    for (const SceneSource &source : m_sceneDocument->sources()) {
+        if (source.type == SceneSourceType::Camera)
+            m_sceneCanvas->setSourcePreview(source.id, frame);
+    }
+}
+
+bool MainWindow::openProjectDirectory(const QString &directory) {
+    auto loaded = m_projectStore->load(directory);
+    if (!loaded.ok()) {
+        if (m_projectFeedback) m_projectFeedback->setText(loaded.error);
+        return false;
+    }
+    m_sceneDocument = std::move(loaded.document);
+    m_currentProject = std::make_unique<ProjectInfo>(loaded.project);
+    m_sceneCanvas->setDocument(m_sceneDocument.get(), static_cast<SceneFormat>(m_sceneFormat));
+    refreshLayerList();
+    loadRecordedPreviews(*m_currentProject);
+    if (m_projectFeedback) m_projectFeedback->clear();
+    selectPage(0);
+    setStudioMode(true);
+    return true;
 }
 
 void MainWindow::toggleRecording() {
@@ -471,62 +540,12 @@ void MainWindow::toggleRecording() {
     const auto created = m_projectStore->create(*m_sceneDocument);
     if (!created.ok()) { m_recordingStatus->setText(created.error); return; }
     m_currentProject = std::make_unique<ProjectInfo>(created.project);
-    QWidget *target = m_videoSurface->findChild<QWidget *>(QStringLiteral("nativeVideoTarget"));
-    if (!target) target = m_videoSurface;
-    const qreal scale = target->devicePixelRatioF();
-    const QPoint global = target->mapToGlobal(QPoint(0, 0));
     RecordingOptions options;
-#ifdef Q_OS_WIN
-    const HWND targetWindow = reinterpret_cast<HWND>(target->winId());
-    RECT targetRect{};
-    MONITORINFO monitorInfo{};
-    monitorInfo.cbSize = sizeof(monitorInfo);
-    const HMONITOR monitor = MonitorFromWindow(targetWindow, MONITOR_DEFAULTTONEAREST);
-    if (GetWindowRect(targetWindow, &targetRect) && GetMonitorInfoW(monitor, &monitorInfo)) {
-        options.monitorHandle = reinterpret_cast<quint64>(monitor);
-        options.captureRect = QRect(targetRect.left - monitorInfo.rcMonitor.left,
-                                    targetRect.top - monitorInfo.rcMonitor.top,
-                                    targetRect.right - targetRect.left,
-                                    targetRect.bottom - targetRect.top);
-    } else
-#endif
-    options.captureRect = QRect(qRound(global.x() * scale), qRound(global.y() * scale),
-                                qRound(target->width() * scale), qRound(target->height() * scale));
     options.camera = m_recordCamera->isChecked();
     options.microphone = m_recordMicrophone->isChecked();
     options.systemAudio = true;
     if (!m_recordingSession->start(*m_currentProject, options))
         m_recordingStatus->setText(m_recordingSession->lastError());
-}
-
-void MainWindow::refreshRecordingCapture() {
-    if (!m_recordingSession || m_recordingSession->state() != RecordingState::Recording || !m_videoSurface)
-        return;
-    QWidget *target = m_videoSurface->findChild<QWidget *>(QStringLiteral("nativeVideoTarget"));
-    if (!target) target = m_videoSurface;
-    quint64 monitorHandle = 0;
-    QRect captureRect;
-#ifdef Q_OS_WIN
-    const HWND targetWindow = reinterpret_cast<HWND>(target->winId());
-    RECT targetRect{};
-    MONITORINFO monitorInfo{};
-    monitorInfo.cbSize = sizeof(monitorInfo);
-    const HMONITOR monitor = MonitorFromWindow(targetWindow, MONITOR_DEFAULTTONEAREST);
-    if (GetWindowRect(targetWindow, &targetRect) && GetMonitorInfoW(monitor, &monitorInfo)) {
-        monitorHandle = reinterpret_cast<quint64>(monitor);
-        captureRect = QRect(targetRect.left - monitorInfo.rcMonitor.left,
-                            targetRect.top - monitorInfo.rcMonitor.top,
-                            targetRect.right - targetRect.left,
-                            targetRect.bottom - targetRect.top);
-    }
-#endif
-    if (captureRect.isEmpty()) {
-        const qreal scale = target->devicePixelRatioF();
-        const QPoint global = target->mapToGlobal(QPoint(0, 0));
-        captureRect = QRect(qRound(global.x() * scale), qRound(global.y() * scale),
-                            qRound(target->width() * scale), qRound(target->height() * scale));
-    }
-    m_recordingSession->updateCaptureRect(monitorHandle, captureRect);
 }
 
 void MainWindow::exportCurrentProject() {
@@ -538,6 +557,19 @@ void MainWindow::exportCurrentProject() {
         m_recordingStatus->setText(QStringLiteral("Stop recording before export"));
         return;
     }
+    const ProjectLoadResult persisted = m_projectStore->load(m_currentProject->directory);
+    if (!persisted.ok()) {
+        m_recordingStatus->setText(QStringLiteral("Could not verify the project before export: %1")
+                                       .arg(persisted.error));
+        return;
+    }
+    if (persisted.project.state != ProjectState::Ready) {
+        m_recordingStatus->setText(persisted.project.state == ProjectState::Recoverable
+            ? QStringLiteral("Recover this project before export")
+            : QStringLiteral("The project must be Ready before export"));
+        return;
+    }
+    *m_currentProject = persisted.project;
     saveCurrentProject();
     QDir().mkpath(m_currentProject->exportsDirectory());
     const QString format = m_sceneFormat == static_cast<int>(SceneFormat::Vertical)
@@ -637,6 +669,7 @@ QWidget *MainWindow::createPlayerPage() {
     m_previewStack->addWidget(m_videoSurface);
     m_previewStack->addWidget(m_sceneCanvas);
     m_playerLayout->addWidget(m_previewStack, 1);
+    m_cameraSelfView = new CameraSelfView(m_previewStack);
 
     m_playerControls = new QWidget(m_playerCard);
     m_playerControls->setObjectName(QStringLiteral("playerControls"));
@@ -724,6 +757,9 @@ QWidget *MainWindow::createPlayerPage() {
     m_recordCamera = new QCheckBox(QStringLiteral("Camera track"), m_sessionPanel);
     m_recordMicrophone = new QCheckBox(QStringLiteral("Microphone track"), m_sessionPanel);
     dock->addWidget(m_recordCamera);
+    connect(m_recordCamera, &QCheckBox::toggled, this, [this](bool enabled) {
+        setCameraPreviewEnabled(enabled);
+    });
     dock->addWidget(m_recordMicrophone);
     m_recordingStatus = mutedLabel(QStringLiteral("Ready to record"), m_sessionPanel);
     dock->addWidget(m_recordingStatus);
@@ -849,6 +885,11 @@ QWidget *MainWindow::createProjectsPage() {
     m_projectList = new QListWidget(projectCard);
     m_projectList->setObjectName(QStringLiteral("projectList"));
     projectLayout->addWidget(m_projectList, 1);
+    m_projectFeedback = mutedLabel(QString(), projectCard);
+    m_projectFeedback->setObjectName(QStringLiteral("projectFeedback"));
+    m_projectFeedback->setAccessibleName(QStringLiteral("projectFeedback"));
+    m_projectFeedback->setWordWrap(true);
+    projectLayout->addWidget(m_projectFeedback);
     auto *actions = new QHBoxLayout;
     auto *open = new QPushButton(QStringLiteral("Open in Studio"), projectCard);
     open->setObjectName(QStringLiteral("primaryButton"));
@@ -856,28 +897,55 @@ QWidget *MainWindow::createProjectsPage() {
     connect(open, &QPushButton::clicked, this, [this]() {
         auto *item = m_projectList ? m_projectList->currentItem() : nullptr;
         if (!item) return;
-        auto loaded = m_projectStore->load(item->data(Qt::UserRole).toString());
-        if (!loaded.ok()) return;
-        m_sceneDocument = std::move(loaded.document);
-        m_currentProject = std::make_unique<ProjectInfo>(loaded.project);
-        m_sceneCanvas->setDocument(m_sceneDocument.get(), static_cast<SceneFormat>(m_sceneFormat));
-        refreshLayerList();
-        loadRecordedPreviews(*m_currentProject);
-        selectPage(0);
-        setStudioMode(true);
+        openProjectDirectory(item->data(Qt::UserRole).toString());
     });
     actions->addWidget(open);
-    auto *recover = new QPushButton(QStringLiteral("Recover session"), projectCard);
-    recover->setObjectName(QStringLiteral("secondaryButton"));
-    recover->setAccessibleName(QStringLiteral("recoverProjectButton"));
-    connect(recover, &QPushButton::clicked, this, [this, open]() {
+    m_recoverProjectButton = new QPushButton(QStringLiteral("Recover session"), projectCard);
+    m_recoverProjectButton->setObjectName(QStringLiteral("secondaryButton"));
+    m_recoverProjectButton->setAccessibleName(QStringLiteral("recoverProjectButton"));
+    m_recoverProjectButton->setEnabled(false);
+    connect(m_projectList, &QListWidget::currentItemChanged, this,
+            [this](QListWidgetItem *current) {
+        bool recoverable = false;
+        if (current) {
+            const auto loaded = m_projectStore->load(current->data(Qt::UserRole).toString());
+            recoverable = loaded.ok() && loaded.project.state == ProjectState::Recoverable;
+            if (!loaded.ok() && m_projectFeedback) m_projectFeedback->setText(loaded.error);
+            else if (m_projectFeedback) m_projectFeedback->clear();
+        }
+        m_recoverProjectButton->setEnabled(recoverable);
+    });
+    connect(m_recoverProjectButton, &QPushButton::clicked, this, [this]() {
         auto *item = m_projectList ? m_projectList->currentItem() : nullptr;
         if (!item) return;
-        m_projectStore->setState(item->data(Qt::UserRole).toString(), ProjectState::Ready);
-        refreshProjectList();
-        open->click();
+        const QString directory = item->data(Qt::UserRole).toString();
+        m_recoverProjectButton->setEnabled(false);
+        m_projectFeedback->setText(QStringLiteral("Checking finalized media fragments..."));
+        QThread *thread = QThread::create([this, directory]() {
+            const ProjectRecoveryResult result = m_projectStore->recover(directory, []() {
+                return QThread::currentThread()->isInterruptionRequested();
+            });
+            QMetaObject::invokeMethod(this, [this, directory, result]() {
+                refreshProjectList();
+                if (!result.ok()) {
+                    m_projectFeedback->setText(result.error);
+                    return;
+                }
+                if (m_recordingStatus) {
+                    m_recordingStatus->setText(QStringLiteral(
+                        "Recovered %1 media fragment(s); preserved %2 incomplete fragment(s)")
+                        .arg(result.usableMediaFiles).arg(result.quarantinedMediaFiles));
+                }
+                openProjectDirectory(directory);
+            }, Qt::QueuedConnection);
+        });
+        m_previewThreads.append(thread);
+        connect(thread, &QThread::finished, this,
+                [this, thread]() { m_previewThreads.removeAll(thread); });
+        connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        thread->start();
     });
-    actions->addWidget(recover);
+    actions->addWidget(m_recoverProjectButton);
     actions->addStretch();
     projectLayout->addLayout(actions);
     layout->addWidget(projectCard, 1);
@@ -1108,7 +1176,7 @@ void MainWindow::restartReceiver() {
 }
 
 void MainWindow::toggleReceiver() {
-    if (m_engine->isRunning()) {
+    if (receiverToggleStops(m_engine->state())) {
         stopReceiver();
     } else {
         startReceiver();
@@ -1121,7 +1189,7 @@ void MainWindow::handleStateChanged(ReceiverState state) {
     m_statusBadge->setStyleSheet(QStringLiteral(
         "QLabel { color: %1; background: %1; background-color: rgba(255,255,255,0.06);"
         " border: 1px solid %1; border-radius: 12px; padding: 5px 10px; }").arg(color));
-    const bool running = state != ReceiverState::Stopped;
+    const bool running = receiverToggleStops(state);
     m_receiverToggle->setText(running ? QStringLiteral("Stop receiver")
                                       : QStringLiteral("Start receiver"));
     if (m_trayReceiverAction) {
@@ -1194,6 +1262,11 @@ void MainWindow::handleReceiverEvent(const ReceiverEvent &event) {
         category = QStringLiteral("Warning");
     } else if (type == UXPLAY_EVENT_ERROR) {
         category = QStringLiteral("Error");
+        if (event.message.contains(QStringLiteral("recording"), Qt::CaseInsensitive) &&
+            m_recordingSession) {
+            m_recordingSession->markAirplayFailure(event.message);
+            if (m_recordingStatus) m_recordingStatus->setText(m_recordingSession->statusSummary());
+        }
     }
     appendActivity(category, event.message.isEmpty() ? receiverStateLabel(m_engine->state())
                                                       : event.message);
@@ -1373,7 +1446,6 @@ void MainWindow::enterFullscreen() {
     if (m_fullscreen) return;
     selectPage(0);
     setStudioMode(false);
-
     m_geometryBeforeFullscreen = saveGeometry();
     m_windowStateBeforeFullscreen = windowState() & ~Qt::WindowFullScreen;
     m_fullscreen = true;
@@ -1484,14 +1556,4 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
         return;
     }
     QMainWindow::keyPressEvent(event);
-}
-
-void MainWindow::moveEvent(QMoveEvent *event) {
-    QMainWindow::moveEvent(event);
-    QTimer::singleShot(0, this, &MainWindow::refreshRecordingCapture);
-}
-
-void MainWindow::resizeEvent(QResizeEvent *event) {
-    QMainWindow::resizeEvent(event);
-    QTimer::singleShot(0, this, &MainWindow::refreshRecordingCapture);
 }

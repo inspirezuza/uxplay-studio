@@ -23,9 +23,11 @@
 #include "mux_renderer.h"
 
 #define SECOND_IN_NSECS 1000000000UL
+#define DEFAULT_HANDOFF_MAX_ITEMS 512
+#define DEFAULT_HANDOFF_MAX_BYTES (64 * 1024 * 1024)
 
 static logger_t *logger = NULL;
-static const char *output_filename = NULL;
+static char *output_filename = NULL;
 static int file_count = 0;
 static gboolean no_audio = FALSE;
 static gboolean no_video = FALSE;
@@ -38,6 +40,48 @@ static GBytes *cached_video_config = NULL;
 static gboolean cached_video_is_h265 = FALSE;
 static gint cached_video_codec = -1;
 static GMutex video_config_mutex;
+
+typedef enum mux_command_type_e {
+    MUX_COMMAND_VIDEO,
+    MUX_COMMAND_AUDIO,
+    MUX_COMMAND_VIDEO_CODEC,
+    MUX_COMMAND_AUDIO_CODEC,
+    MUX_COMMAND_STOP,
+    MUX_COMMAND_QUIT
+} mux_command_type_t;
+
+typedef struct mux_completion_s {
+    GMutex mutex;
+    GCond condition;
+    gboolean done;
+    gboolean result;
+} mux_completion_t;
+
+typedef struct mux_command_s {
+    mux_command_type_t type;
+    guint8 *data;
+    gint data_len;
+    guint64 ntp_time;
+    gboolean is_h265;
+    guint8 audio_ct;
+    gboolean require_video_data;
+    gboolean internal_stop;
+    gboolean reserved;
+    mux_completion_t *completion;
+} mux_command_t;
+
+static GAsyncQueue *handoff_queue = NULL;
+static GThread *handoff_worker = NULL;
+static volatile gint handoff_shutdown = TRUE;
+static volatile gint handoff_accepting = FALSE;
+static volatile gint handoff_may_accept = FALSE;
+static volatile gint handoff_failed = FALSE;
+static volatile gint handoff_users = 0;
+static volatile gint handoff_items = 0;
+static volatile gint handoff_bytes = 0;
+static volatile gint handoff_max_items = DEFAULT_HANDOFF_MAX_ITEMS;
+static volatile gint handoff_max_bytes = DEFAULT_HANDOFF_MAX_BYTES;
+static volatile gint test_consumer_delay_ms = 0;
 
 typedef struct mux_renderer_s {
     GstElement *pipeline;
@@ -53,9 +97,82 @@ typedef struct mux_renderer_s {
     gboolean is_h265;
     gboolean failed;
     guint64 video_buffers;
+    gint first_fragment;
 } mux_renderer_t;
 
 static mux_renderer_t *renderer = NULL;
+
+static bool mux_renderer_start_internal(void);
+static bool mux_renderer_stop_internal(bool require_video_data);
+static void mux_renderer_destroy_internal(void);
+static gpointer handoff_worker_main(gpointer unused);
+
+static void mark_handoff_failed(const char *message) {
+    if (g_atomic_int_compare_and_exchange(&handoff_failed, FALSE, TRUE)) {
+        if (logger && message) logger_log(logger, LOGGER_ERR, "%s", message);
+    }
+}
+
+static void completion_init(mux_completion_t *completion) {
+    g_mutex_init(&completion->mutex);
+    g_cond_init(&completion->condition);
+    completion->done = FALSE;
+    completion->result = FALSE;
+}
+
+static void completion_finish(mux_completion_t *completion, gboolean result) {
+    if (!completion) return;
+    g_mutex_lock(&completion->mutex);
+    completion->result = result;
+    completion->done = TRUE;
+    g_cond_signal(&completion->condition);
+    g_mutex_unlock(&completion->mutex);
+}
+
+static gboolean completion_wait(mux_completion_t *completion) {
+    g_mutex_lock(&completion->mutex);
+    while (!completion->done) g_cond_wait(&completion->condition, &completion->mutex);
+    const gboolean result = completion->result;
+    g_mutex_unlock(&completion->mutex);
+    g_cond_clear(&completion->condition);
+    g_mutex_clear(&completion->mutex);
+    return result;
+}
+
+static void release_handoff_reservation(const mux_command_t *command) {
+    if (!command || !command->reserved) return;
+    if (command->data_len > 0) g_atomic_int_add(&handoff_bytes, -command->data_len);
+    g_atomic_int_add(&handoff_items, -1);
+}
+
+static void free_command(mux_command_t *command) {
+    if (!command) return;
+    g_free(command->data);
+    g_free(command);
+}
+
+static gboolean reserve_counter(volatile gint *counter, gint amount, gint limit) {
+    for (;;) {
+        const gint current = g_atomic_int_get(counter);
+        if (amount < 0 || current > limit - amount) return FALSE;
+        if (g_atomic_int_compare_and_exchange(counter, current, current + amount)) return TRUE;
+    }
+}
+
+static gboolean reserve_handoff(gint data_len) {
+    const gint max_items = g_atomic_int_get(&handoff_max_items);
+    const gint max_bytes = g_atomic_int_get(&handoff_max_bytes);
+    if (!reserve_counter(&handoff_items, 1, max_items)) return FALSE;
+    if (!reserve_counter(&handoff_bytes, data_len, max_bytes)) {
+        g_atomic_int_add(&handoff_items, -1);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void wait_for_handoff_users(void) {
+    while (g_atomic_int_get(&handoff_users) != 0) g_thread_yield();
+}
 
 static void discard_partial_renderer(void) {
     if (!renderer) return;
@@ -117,6 +234,7 @@ static const char alac_caps[] = "audio/x-alac,mpegversion=(int)4,channels=(int)2
 
 /* called once when uxplay first starts */
 void mux_renderer_init(logger_t *render_logger, const char *filename, bool use_audio, bool use_video) {
+    mux_renderer_destroy();
     logger = render_logger;
     no_audio = !use_audio;
     no_video = !use_video;
@@ -131,8 +249,28 @@ void mux_renderer_init(logger_t *render_logger, const char *filename, bool use_a
     } else if (no_video) {
         logger_log(logger, LOGGER_INFO, "video rendering is disabled: audio only will be recorded");
     }
-    output_filename = filename ;
+    g_free(output_filename);
+    output_filename = g_strdup(filename);
     file_count = 0;
+    g_atomic_int_set(&handoff_items, 0);
+    g_atomic_int_set(&handoff_bytes, 0);
+    g_atomic_int_set(&handoff_failed, FALSE);
+    g_atomic_int_set(&handoff_accepting, FALSE);
+    g_atomic_int_set(&handoff_may_accept, TRUE);
+    g_atomic_int_set(&handoff_shutdown, FALSE);
+    handoff_queue = g_async_queue_new();
+    GError *thread_error = NULL;
+    handoff_worker = g_thread_try_new("uxplay-mux", handoff_worker_main, NULL, &thread_error);
+    if (!handoff_worker) {
+        logger_log(logger, LOGGER_ERR, "Could not create mux handoff worker: %s",
+                   thread_error ? thread_error->message : "unknown error");
+        g_clear_error(&thread_error);
+        g_async_queue_unref(handoff_queue);
+        handoff_queue = NULL;
+        g_atomic_int_set(&handoff_shutdown, TRUE);
+        mark_handoff_failed(NULL);
+        return;
+    }
     logger_log(logger, LOGGER_INFO, "Mux renderer initialized: %s", output_filename);
 }
 
@@ -144,10 +282,10 @@ gchar *direct_fragment_location(GstElement *splitmux, guint fragment_id, gpointe
     return g_strdup_printf("%s-%05u.mkv", output_filename, fragment_id);
 }
 
-static gboolean direct_output_exists(void) {
+static gboolean direct_output_exists(gint first_fragment) {
     if (!direct_video_only || !output_filename) return TRUE;
     const gint fragment_count = g_atomic_int_get(&next_direct_fragment);
-    for (gint fragment = 0; fragment < fragment_count; ++fragment) {
+    for (gint fragment = first_fragment; fragment < fragment_count; ++fragment) {
         gchar *path = g_strdup_printf("%s-%05d.mkv", output_filename, fragment);
         GStatBuf stat_buffer;
         const gboolean valid = g_stat(path, &stat_buffer) == 0 && stat_buffer.st_size > 0;
@@ -158,7 +296,7 @@ static gboolean direct_output_exists(void) {
 }
 
 static
-bool mux_renderer_start(void) {
+bool mux_renderer_start_internal(void) {
     GError *error = NULL;
     GstCaps *video_caps = NULL;
     GstCaps *audio_caps = NULL;
@@ -168,7 +306,7 @@ bool mux_renderer_start(void) {
         return mux_session_clean && !renderer->failed;
     }
 
-    mux_renderer_destroy();
+    mux_renderer_destroy_internal();
     
     renderer = g_new0(mux_renderer_t, 1);
     renderer->base_time = GST_CLOCK_TIME_NONE;
@@ -180,6 +318,7 @@ bool mux_renderer_start(void) {
     renderer->audio_appsrc = NULL;
     renderer->is_alac = audio_is_alac;
     renderer->is_h265 = video_is_h265;
+    renderer->first_fragment = g_atomic_int_get(&next_direct_fragment);
 
     file_count++;
     GString *filename = g_string_new("");
@@ -224,7 +363,7 @@ bool mux_renderer_start(void) {
     if (direct_video_only) {
         g_string_append_printf(launch,
             "splitmuxsink name=mux muxer-factory=matroskamux max-size-time=30000000000 "
-            "async-finalize=true start-index=%d location=\"unused.mkv\"",
+            "async-finalize=false start-index=%d location=\"unused.mkv\"",
             g_atomic_int_get(&next_direct_fragment));
     } else {
         g_string_append(launch, "mp4mux name=mux ! filesink name=filesink location=\"unused.mp4\"");
@@ -325,43 +464,33 @@ bool mux_renderer_start(void) {
     return mux_session_clean;
 }
 
-/* called by audio_get_format callback in uxplay.cpp, from raop_handlers.h */
-void mux_renderer_choose_audio_codec(unsigned char audio_ct) {
-    if (no_audio) {
-        return;
-    }
-    audio_is_alac = (audio_ct == 2);
-    if (renderer && renderer->is_alac != audio_is_alac) {
+static bool process_audio_codec(unsigned char audio_ct) {
+    if (no_audio) return true;
+    const gboolean requested_alac = (audio_ct == 2);
+    if (renderer && renderer->is_alac != requested_alac) {
         logger_log(logger, LOGGER_DEBUG, "Audio codec changed, recreating mux renderer");
-        mux_renderer_destroy();
+        mux_renderer_destroy_internal();
     }
-    if (audio_ct == 2) {
-        mux_renderer_start();
-    }
+    audio_is_alac = requested_alac;
+    return audio_ct != 2 || mux_renderer_start_internal();
 }
 
-/* called by video_set_codec calback in uxplay.cpp, from raop_rtp_mirror */
-bool mux_renderer_choose_video_codec(bool is_h265) {
-    video_is_h265 = is_h265;
-    if (renderer && renderer->pipeline && renderer->is_h265 != video_is_h265) {
+static bool process_video_codec(bool is_h265) {
+    if (renderer && renderer->pipeline && renderer->is_h265 != is_h265) {
         logger_log(logger, LOGGER_DEBUG, "Video codec changed, recreating mux renderer");
-        mux_renderer_destroy();
+        mux_renderer_destroy_internal();
     }
+    video_is_h265 = is_h265;
     logger_log(logger, LOGGER_DEBUG, "Mux renderer video codec: h265=%s", is_h265 ? "true" : "false");
-    return mux_renderer_start();
+    return mux_renderer_start_internal();
 }
 
-/* called by video_process callback in uxplay.cpp*/
-void mux_renderer_push_video(unsigned char *data, int data_len, uint64_t ntp_time) {
-    if (no_video) {
-        return;
-    }
-    if (!renderer || !renderer->pipeline || !renderer->video_appsrc) return;
+static bool push_video_internal(const unsigned char *data, int data_len, uint64_t ntp_time) {
+    if (no_video) return true;
+    if (!renderer || !renderer->pipeline || !renderer->video_appsrc) return false;
 
     GstBuffer *buffer = gst_buffer_new_allocate(NULL, data_len, NULL);
-    if (!buffer) {
-        return;
-    }
+    if (!buffer) return false;
     gst_buffer_fill(buffer, 0, data, data_len);
 
     if (renderer->base_time == GST_CLOCK_TIME_NONE) {
@@ -373,16 +502,17 @@ void mux_renderer_push_video(unsigned char *data, int data_len, uint64_t ntp_tim
     GST_BUFFER_PTS(buffer) = pts;
     GST_BUFFER_DTS(buffer) = pts;
     const GstFlowReturn flow = gst_app_src_push_buffer(GST_APP_SRC(renderer->video_appsrc), buffer);
-    if (flow != GST_FLOW_OK) renderer->failed = TRUE;
-    else renderer->video_buffers++;
+    if (flow != GST_FLOW_OK) {
+        renderer->failed = TRUE;
+        return false;
+    }
+    renderer->video_buffers++;
+    return true;
 }
 
-/* called by audio_process callback in uxplay.cpp*/
-void mux_renderer_push_audio(unsigned char *data, int data_len, uint64_t ntp_time) {
-    if (no_audio) {
-        return;
-    }
-    if (!renderer || !renderer->pipeline || !renderer->audio_appsrc) return;
+static bool push_audio_internal(const unsigned char *data, int data_len, uint64_t ntp_time) {
+    if (no_audio) return true;
+    if (!renderer || !renderer->pipeline || !renderer->audio_appsrc) return false;
 
     if (!renderer->audio_started && renderer->first_video_time != GST_CLOCK_TIME_NONE) {
         renderer->audio_started = TRUE;
@@ -390,43 +520,38 @@ void mux_renderer_push_audio(unsigned char *data, int data_len, uint64_t ntp_tim
         if (renderer->first_audio_time > renderer->first_video_time) {
             GstClockTime silence_duration = renderer->first_audio_time - renderer->first_video_time;
             guint64 num_samples = (silence_duration * 44100) / GST_SECOND;
-            gsize silence_size = num_samples * 2 * 2;            
+            gsize silence_size = num_samples * 2 * 2;
             GstBuffer *silence_buffer = gst_buffer_new_allocate(NULL, silence_size, NULL);
-            if (silence_buffer) {
-                GstMapInfo map;
-                if (gst_buffer_map(silence_buffer, &map, GST_MAP_WRITE)) {
-                    memset(map.data, 0, map.size);
-                    gst_buffer_unmap(silence_buffer, &map);
-                }
-                GST_BUFFER_PTS(silence_buffer) = 0;
-                GST_BUFFER_DTS(silence_buffer) = 0;
-                GST_BUFFER_DURATION(silence_buffer) = silence_duration;
-                gst_app_src_push_buffer(GST_APP_SRC(renderer->audio_appsrc), silence_buffer);
-                logger_log(logger, LOGGER_DEBUG, "Inserted %.2f seconds of silence before audio", 
-                          (double)silence_duration / GST_SECOND);
+            if (!silence_buffer) return false;
+            GstMapInfo map;
+            if (gst_buffer_map(silence_buffer, &map, GST_MAP_WRITE)) {
+                memset(map.data, 0, map.size);
+                gst_buffer_unmap(silence_buffer, &map);
             }
+            GST_BUFFER_PTS(silence_buffer) = 0;
+            GST_BUFFER_DTS(silence_buffer) = 0;
+            GST_BUFFER_DURATION(silence_buffer) = silence_duration;
+            if (gst_app_src_push_buffer(GST_APP_SRC(renderer->audio_appsrc), silence_buffer) != GST_FLOW_OK)
+                return false;
+            logger_log(logger, LOGGER_DEBUG, "Inserted %.2f seconds of silence before audio",
+                       (double)silence_duration / GST_SECOND);
         }
     }
 
     GstBuffer *buffer = gst_buffer_new_allocate(NULL, data_len, NULL);
-    if (!buffer) return;
-
+    if (!buffer) return false;
     gst_buffer_fill(buffer, 0, data, data_len);
 
-    if (renderer->base_time == GST_CLOCK_TIME_NONE) {
-        renderer->base_time = (GstClockTime)ntp_time;
-    }
-
+    if (renderer->base_time == GST_CLOCK_TIME_NONE) renderer->base_time = (GstClockTime)ntp_time;
     GstClockTime pts = (GstClockTime)ntp_time - renderer->base_time;
     GST_BUFFER_PTS(buffer) = pts;
     GST_BUFFER_DTS(buffer) = pts;
-
-    gst_app_src_push_buffer(GST_APP_SRC(renderer->audio_appsrc), buffer);
+    return gst_app_src_push_buffer(GST_APP_SRC(renderer->audio_appsrc), buffer) == GST_FLOW_OK;
 }
 
-/* called by conn_destroy callback in uxplay.cpp, and when video resets */
-bool mux_renderer_stop(void) {
-    if (!renderer || !renderer->pipeline) return mux_session_clean;
+static bool mux_renderer_stop_internal(bool require_video_data) {
+    if (!renderer || !renderer->pipeline)
+        return require_video_data ? FALSE : mux_session_clean;
 
     gboolean clean = !renderer->failed;
     const gboolean has_video_data = no_video || renderer->video_buffers > 0;
@@ -479,7 +604,7 @@ bool mux_renderer_stop(void) {
     renderer->pipeline = NULL;
 
     renderer->base_time = GST_CLOCK_TIME_NONE;
-    if (!has_video_data || !direct_output_exists()) {
+    if (require_video_data && (!has_video_data || !direct_output_exists(renderer->first_fragment))) {
         logger_log(logger, LOGGER_ERR, "Recording finalized without a usable video segment");
         clean = FALSE;
     }
@@ -490,10 +615,251 @@ bool mux_renderer_stop(void) {
     return mux_session_clean;
 }
 
-void mux_renderer_destroy(void) {
-    mux_renderer_stop();
+static void mux_renderer_destroy_internal(void) {
     if (renderer) {
+        if (renderer->pipeline) mux_renderer_stop_internal(FALSE);
         g_free(renderer);
         renderer = NULL;
     }
+}
+
+static gpointer handoff_worker_main(gpointer unused) {
+    (void) unused;
+    for (;;) {
+        mux_command_t *command = g_async_queue_pop(handoff_queue);
+        gboolean result = TRUE;
+        switch (command->type) {
+        case MUX_COMMAND_VIDEO:
+            if (g_atomic_int_get(&test_consumer_delay_ms) > 0)
+                g_usleep((gulong) g_atomic_int_get(&test_consumer_delay_ms) * 1000);
+            if (g_atomic_int_get(&handoff_failed)) result = TRUE;
+            else result = push_video_internal(command->data, command->data_len, command->ntp_time);
+            break;
+        case MUX_COMMAND_AUDIO:
+            if (g_atomic_int_get(&test_consumer_delay_ms) > 0)
+                g_usleep((gulong) g_atomic_int_get(&test_consumer_delay_ms) * 1000);
+            if (g_atomic_int_get(&handoff_failed)) result = TRUE;
+            else result = push_audio_internal(command->data, command->data_len, command->ntp_time);
+            break;
+        case MUX_COMMAND_VIDEO_CODEC:
+            result = process_video_codec(command->is_h265);
+            if (result && g_atomic_int_get(&handoff_may_accept))
+                g_atomic_int_set(&handoff_accepting, TRUE);
+            break;
+        case MUX_COMMAND_AUDIO_CODEC:
+            result = process_audio_codec(command->audio_ct);
+            if (result && renderer && renderer->pipeline &&
+                g_atomic_int_get(&handoff_may_accept))
+                g_atomic_int_set(&handoff_accepting, TRUE);
+            break;
+        case MUX_COMMAND_STOP:
+            g_atomic_int_set(&handoff_accepting, FALSE);
+            result = mux_renderer_stop_internal(!command->internal_stop);
+            break;
+        case MUX_COMMAND_QUIT:
+            result = mux_renderer_stop_internal(command->require_video_data);
+            mux_renderer_destroy_internal();
+            release_handoff_reservation(command);
+            completion_finish(command->completion, result);
+            free_command(command);
+            return NULL;
+        }
+        release_handoff_reservation(command);
+        if (!result) mark_handoff_failed("Recording mux handoff failed");
+        completion_finish(command->completion,
+                          result && !g_atomic_int_get(&handoff_failed));
+        free_command(command);
+    }
+}
+
+static gboolean enqueue_owned_command(mux_command_t *command) {
+    g_atomic_int_inc(&handoff_users);
+    if (g_atomic_int_get(&handoff_shutdown) || !handoff_queue || !handoff_worker) {
+        g_atomic_int_add(&handoff_users, -1);
+        return FALSE;
+    }
+    g_async_queue_push(handoff_queue, command);
+    g_atomic_int_add(&handoff_users, -1);
+    return TRUE;
+}
+
+static gboolean enqueue_control_and_wait(mux_command_type_t type, gboolean is_h265,
+                                         unsigned char audio_ct) {
+    mux_completion_t completion;
+    completion_init(&completion);
+    mux_command_t *command = g_new0(mux_command_t, 1);
+    command->type = type;
+    command->is_h265 = is_h265;
+    command->audio_ct = audio_ct;
+    command->completion = &completion;
+    if (!enqueue_owned_command(command)) {
+        free_command(command);
+        g_cond_clear(&completion.condition);
+        g_mutex_clear(&completion.mutex);
+        return FALSE;
+    }
+    return completion_wait(&completion);
+}
+
+static gboolean enqueue_control(mux_command_type_t type, gboolean is_h265,
+                                unsigned char audio_ct, gboolean internal_stop) {
+    g_atomic_int_inc(&handoff_users);
+    if (g_atomic_int_get(&handoff_shutdown) || !handoff_queue || !handoff_worker) {
+        g_atomic_int_add(&handoff_users, -1);
+        return FALSE;
+    }
+    if (!reserve_handoff(0)) {
+        g_atomic_int_add(&handoff_users, -1);
+        mark_handoff_failed("Recording stopped because its bounded handoff queue could not accept a control boundary");
+        return FALSE;
+    }
+    mux_command_t *command = g_try_new0(mux_command_t, 1);
+    if (!command) {
+        g_atomic_int_add(&handoff_items, -1);
+        g_atomic_int_add(&handoff_users, -1);
+        mark_handoff_failed("Recording stopped because a handoff control boundary could not be allocated");
+        return FALSE;
+    }
+    command->type = type;
+    command->is_h265 = is_h265;
+    command->audio_ct = audio_ct;
+    command->internal_stop = internal_stop;
+    command->reserved = TRUE;
+    g_async_queue_push(handoff_queue, command);
+    g_atomic_int_add(&handoff_users, -1);
+    return TRUE;
+}
+
+static bool enqueue_data(mux_command_type_t type, unsigned char *data, int data_len,
+                         uint64_t ntp_time, bool *accepted) {
+    if (accepted) *accepted = false;
+    if (!data || data_len <= 0) return true;
+
+    g_atomic_int_inc(&handoff_users);
+    if (g_atomic_int_get(&handoff_shutdown) || !g_atomic_int_get(&handoff_accepting) ||
+        !handoff_queue || !handoff_worker) {
+        g_atomic_int_add(&handoff_users, -1);
+        return true;
+    }
+    if (!reserve_handoff(data_len)) {
+        g_atomic_int_add(&handoff_users, -1);
+        mark_handoff_failed("Recording stopped accepting media because its bounded handoff queue overflowed");
+        return false;
+    }
+
+    mux_command_t *command = g_try_new0(mux_command_t, 1);
+    guint8 *copy = g_try_malloc((gsize) data_len);
+    if (!command || !copy) {
+        g_free(command);
+        g_free(copy);
+        g_atomic_int_add(&handoff_bytes, -data_len);
+        g_atomic_int_add(&handoff_items, -1);
+        g_atomic_int_add(&handoff_users, -1);
+        mark_handoff_failed("Recording stopped accepting media because the handoff copy could not be allocated");
+        return false;
+    }
+    memcpy(copy, data, (gsize) data_len);
+    command->type = type;
+    command->data = copy;
+    command->data_len = data_len;
+    command->ntp_time = ntp_time;
+    command->reserved = TRUE;
+    g_async_queue_push(handoff_queue, command);
+    if (accepted) *accepted = true;
+    g_atomic_int_add(&handoff_users, -1);
+    return true;
+}
+
+bool mux_renderer_choose_audio_codec(unsigned char audio_ct) {
+    return enqueue_control(MUX_COMMAND_AUDIO_CODEC, FALSE, audio_ct, FALSE);
+}
+
+bool mux_renderer_choose_video_codec(bool is_h265) {
+    if (g_atomic_int_get(&handoff_failed)) return false;
+    g_atomic_int_set(&handoff_may_accept, TRUE);
+    return enqueue_control_and_wait(MUX_COMMAND_VIDEO_CODEC, is_h265, 0);
+}
+
+bool mux_renderer_queue_video_codec(bool is_h265) {
+    g_atomic_int_set(&handoff_may_accept, TRUE);
+    return enqueue_control_and_wait(MUX_COMMAND_VIDEO_CODEC, is_h265, 0);
+}
+
+bool mux_renderer_queue_stop(void) {
+    g_atomic_int_set(&handoff_may_accept, FALSE);
+    g_atomic_int_set(&handoff_accepting, FALSE);
+    wait_for_handoff_users();
+    return enqueue_control(MUX_COMMAND_STOP, FALSE, 0, TRUE);
+}
+
+bool mux_renderer_push_video(unsigned char *data, int data_len, uint64_t ntp_time) {
+    return mux_renderer_push_video_with_acceptance(data, data_len, ntp_time, NULL);
+}
+
+bool mux_renderer_push_video_with_acceptance(unsigned char *data, int data_len,
+                                             uint64_t ntp_time, bool *accepted) {
+    if (accepted) *accepted = false;
+    if (no_video) return true;
+    return enqueue_data(MUX_COMMAND_VIDEO, data, data_len, ntp_time, accepted);
+}
+
+bool mux_renderer_push_audio(unsigned char *data, int data_len, uint64_t ntp_time) {
+    if (no_audio) return true;
+    return enqueue_data(MUX_COMMAND_AUDIO, data, data_len, ntp_time, NULL);
+}
+
+bool mux_renderer_stop(void) {
+    g_atomic_int_set(&handoff_may_accept, FALSE);
+    g_atomic_int_set(&handoff_accepting, FALSE);
+    wait_for_handoff_users();
+    if (!handoff_queue || !handoff_worker || g_atomic_int_get(&handoff_shutdown)) return false;
+    const gboolean failed_before_stop = g_atomic_int_get(&handoff_failed);
+    const gboolean result = enqueue_control_and_wait(MUX_COMMAND_STOP, FALSE, 0);
+    return result && !failed_before_stop;
+}
+
+bool mux_renderer_has_failed(void) {
+    return g_atomic_int_get(&handoff_failed) != FALSE;
+}
+
+void mux_renderer_destroy(void) {
+    g_atomic_int_set(&handoff_may_accept, FALSE);
+    g_atomic_int_set(&handoff_accepting, FALSE);
+    g_atomic_int_set(&handoff_shutdown, TRUE);
+    wait_for_handoff_users();
+
+    if (handoff_queue && handoff_worker) {
+        mux_completion_t completion;
+        completion_init(&completion);
+        mux_command_t *command = g_new0(mux_command_t, 1);
+        command->type = MUX_COMMAND_QUIT;
+        command->require_video_data = FALSE;
+        command->completion = &completion;
+        g_async_queue_push(handoff_queue, command);
+        completion_wait(&completion);
+        g_thread_join(handoff_worker);
+        handoff_worker = NULL;
+        g_async_queue_unref(handoff_queue);
+        handoff_queue = NULL;
+    } else {
+        mux_renderer_destroy_internal();
+    }
+    g_atomic_int_set(&handoff_items, 0);
+    g_atomic_int_set(&handoff_bytes, 0);
+    g_free(output_filename);
+    output_filename = NULL;
+}
+
+void mux_renderer_set_test_handoff_limits(unsigned int max_items, unsigned int max_bytes) {
+    g_atomic_int_set(&handoff_max_items,
+                     max_items > 0 && max_items <= G_MAXINT ? (gint) max_items
+                                                            : DEFAULT_HANDOFF_MAX_ITEMS);
+    g_atomic_int_set(&handoff_max_bytes,
+                     max_bytes > 0 && max_bytes <= G_MAXINT ? (gint) max_bytes
+                                                            : DEFAULT_HANDOFF_MAX_BYTES);
+}
+
+void mux_renderer_set_test_consumer_delay(unsigned int delay_ms) {
+    g_atomic_int_set(&test_consumer_delay_ms,
+                     delay_ms <= G_MAXINT ? (gint) delay_ms : G_MAXINT);
 }

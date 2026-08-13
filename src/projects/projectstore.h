@@ -6,6 +6,7 @@
 #include <QList>
 #include <QMutex>
 #include <QString>
+#include <functional>
 #include <memory>
 
 enum class ProjectState {
@@ -52,6 +53,13 @@ struct ProjectLoadResult {
     bool ok() const { return error.isEmpty() && document != nullptr; }
 };
 
+struct ProjectRecoveryResult {
+    int usableMediaFiles = 0;
+    int quarantinedMediaFiles = 0;
+    QString error;
+    bool ok() const { return error.isEmpty(); }
+};
+
 class ProjectStore final {
 public:
     explicit ProjectStore(QString rootDirectory);
@@ -61,6 +69,8 @@ public:
     ProjectLoadResult load(const QString &directory) const;
     QString save(const ProjectInfo &project, const SceneDocument &document) const;
     QString setState(const QString &directory, ProjectState state);
+    ProjectRecoveryResult recover(const QString &directory,
+                                  const std::function<bool()> &cancelled = {});
     QList<ProjectSummary> projects() const;
     QList<ProjectSummary> recoverableProjects();
 

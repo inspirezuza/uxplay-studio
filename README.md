@@ -14,13 +14,15 @@ UxPlay Studio keeps the receiver, live video, OBS-style sources and layers, reco
 ## Highlights
 
 - Embedded AirPlay video in the main app window
-- True video-only fullscreen with `F11` and `Esc`; no app chrome or detached window
+- True borderless fullscreen with `F11` and `Esc`, plus an optional in-app camera self-view; no app chrome or detached window
 - Native Studio workspace with source/layer ordering, visibility, locking, multi-selection, and undo/redo
 - Direct canvas manipulation: drag, resize, crop with `Alt`, rotate, snap, fit, center, opacity, and masks
 - Independent 16:9 Wide and 9:16 Vertical compositions saved in each project
-- Local crash-recoverable recording with separate AirPlay video/audio, camera, and microphone tracks
+- Local crash-recoverable recording with separate direct AirPlay video, system-audio loopback, camera, and microphone tracks
+- Live presenter-camera preview with a draggable, resizable self-view contained inside the Studio window
 - Background MP4 export that applies position, size, crop, arbitrary rotation, opacity, and shape masks
-- Media Foundation H.264 encoding keeps recording/export work off the live AirPlay decode path
+- Bounded asynchronous AirPlay handoff keeps muxing and finalization off the live decode/render path
+- First-sample timestamps align independently captured camera, microphone, system audio, and AirPlay video on export
 - Local Projects browser with interrupted-session recovery
 - Clear receiver states: starting, ready, connecting, sharing, and recovery
 - Device, resolution, and session-duration status
@@ -46,7 +48,7 @@ Windows may display a SmartScreen warning because community builds are not code-
 3. Open Control Center on the Apple device.
 4. Select **Screen Mirroring**, then select the receiver name shown by UxPlay Studio.
 
-Use **Edit layout** to arrange sources without leaving the app. Recording always creates a new local project under `Videos\UxPlay Studio`; enabling camera or microphone creates independent presenter tracks. Stop recording before exporting, choose Wide or Vertical, then select **Export MP4**. See the [Studio guide](docs/STUDIO-GUIDE.md) for canvas controls and recovery behavior.
+Use **Edit layout** to arrange sources without leaving the app. Adding or enabling Camera starts an in-app self-view that can be moved and resized independently of the exported camera layer and remains available in fullscreen. Recording always creates a new local project under `Videos\UxPlay Studio`; enabling camera or microphone creates independent presenter tracks. Stop recording before exporting, choose Wide or Vertical, then select **Export MP4**. See the [Studio guide](docs/STUDIO-GUIDE.md) for canvas controls and recovery behavior.
 
 Some managed, hotel, dorm, or guest Wi-Fi networks block multicast DNS or isolate clients. In that case use a network that permits device-to-device traffic, or enable the Bluetooth discovery fallback. A hotspot is not required when normal Wi-Fi permits discovery and local traffic.
 
@@ -80,8 +82,9 @@ Qt MainWindow
   ├─ Projects / atomic ProjectStore + recovery
   ├─ Activity, Settings, Diagnostics
   ├─ RecordingSession
-  │    ├─ AirPlay surface capture + system-audio loopback
-  │    └─ independent camera and microphone tracks
+  │    ├─ bounded encoded-AirPlay handoff → mux worker → 30-second Matroska segments
+  │    ├─ independent system-audio, camera, and microphone tracks + measured first-sample offsets
+  │    └─ bounded in-app camera preview / self-view
   ├─ ExportJob / GStreamer compositor + Cairo masks
   └─ ReceiverEngine state machine
        └─ vendored libuxplay
@@ -92,7 +95,7 @@ Qt MainWindow
                       └─ GstVideoOverlay → VideoSurface HWND
 ```
 
-`ReceiverEngine` remains the low-latency app-facing seam. Recording muxes the encoded AirPlay stream directly before display, so window movement, fullscreen, page changes, and occlusion never leak into the media file or add work to the decode/render path. The editor receives bounded live/recorded preview frames. Project manifest transactions are serialized and written atomically; every recorded track is segmented every 30 seconds so an interrupted session can retain finalized media. Tests cover state/configuration, native ownership, fullscreen restoration, scene transforms and persistence, recovery, pipeline parsing, direct AirPlay muxing, and a real two-track masked MP4 export.
+`ReceiverEngine` remains the low-latency app-facing seam. The receive callback performs only a bounded, nonblocking encoded-packet handoff; a dedicated worker owns mux writes and finalization. If that queue cannot keep up, Studio reports a failed recording instead of delaying live display or silently corrupting the project. Window movement, fullscreen, page changes, and occlusion never leak into the direct AirPlay media track. The editor receives bounded live/recorded AirPlay and camera preview frames. Project manifest transactions are serialized and written atomically; every recorded track is segmented every 30 seconds, recovery validates usable streams and preserves rejected fragments, and export reapplies offsets measured from each track's first accepted sample. MP4 output is first written as a private `.partial` file and published only after the pipeline completes. Tests cover state/configuration, native ownership, fullscreen restoration, scene transforms and persistence, recovery, asynchronous handoff, pipeline parsing, direct AirPlay muxing, and real masked/cropped MP4 export.
 
 ## Privacy and security
 

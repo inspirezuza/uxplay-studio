@@ -211,14 +211,21 @@ static std::string audio_rtp_pipeline = "";
 static GMainLoop *gmainloop = NULL;
 static std::atomic_bool mux_to_file(false);
 static std::atomic_bool current_video_is_h265(false);
+static std::atomic_uint64_t current_video_codec_epoch(0);
+static std::atomic_bool mux_recording_failed(false);
 static std::mutex mux_recording_mutex;
 static std::string mux_filename = "recording";
 static uxplay_event_callback host_event_callback = NULL;
 static void *host_event_context = NULL;
-static bool recording_test_mode = false;
-static bool recording_test_stop_clean = true;
+static std::atomic_bool recording_test_mode(false);
+static std::atomic_bool recording_test_start_allowed(true);
+static std::atomic_bool recording_test_stop_clean(true);
 static uxplay_preview_callback host_preview_callback = NULL;
 static void *host_preview_context = NULL;
+static std::mutex recording_first_media_callback_mutex;
+static uxplay_recording_first_media_callback recording_first_media_callback = NULL;
+static void *recording_first_media_context = NULL;
+static std::atomic_bool recording_first_video_notified(false);
 
 static void emit_host_event(uxplay_event_type type,
                             const char *device_name = NULL,
@@ -234,6 +241,13 @@ static void emit_host_event(uxplay_event_type type,
         type, device_name, device_model, device_id, message, width, height
     };
     host_event_callback(&event, host_event_context);
+}
+
+static void fail_recording_handoff(const char *message) {
+    bool expected = false;
+    if (mux_recording_failed.compare_exchange_strong(expected, true)) {
+        emit_host_event(UXPLAY_EVENT_ERROR, NULL, NULL, NULL, message);
+    }
 }
 
 extern "C" void uxplay_set_video_window(uintptr_t window_handle) {
@@ -266,29 +280,66 @@ extern "C" void uxplay_set_preview_callback(uxplay_preview_callback callback, vo
     video_renderer_set_preview_sample_callback(callback ? forward_preview_sample : NULL, NULL);
 }
 
+extern "C" void uxplay_set_recording_first_media_callback(
+    uxplay_recording_first_media_callback callback, void *context) {
+    std::lock_guard<std::mutex> lock(recording_first_media_callback_mutex);
+    recording_first_media_callback = callback;
+    recording_first_media_context = context;
+}
+
+static void notify_recording_first_video() {
+    bool expected = false;
+    if (!recording_first_video_notified.compare_exchange_strong(expected, true)) return;
+    const int64_t observed_at_nanoseconds =
+        static_cast<int64_t>(g_get_monotonic_time()) * 1000;
+    std::lock_guard<std::mutex> lock(recording_first_media_callback_mutex);
+    if (recording_first_media_callback) {
+        recording_first_media_callback(observed_at_nanoseconds,
+                                       recording_first_media_context);
+    }
+}
+
 extern "C" int uxplay_start_recording(const char *directory) {
-    std::lock_guard<std::mutex> lock(mux_recording_mutex);
+    std::unique_lock<std::mutex> lock(mux_recording_mutex);
     if (!directory || !*directory || (!render_logger && !recording_test_mode) || mux_to_file) return 0;
+    if (recording_test_mode && !recording_test_start_allowed) return 0;
+    mux_recording_failed = false;
+    recording_first_video_notified = false;
     std::string prefix(directory);
     const char last = prefix.empty() ? '\0' : prefix.back();
     if (last != '/' && last != '\\') prefix += '/';
     prefix += "video";
     mux_filename = prefix;
     if (!recording_test_mode) {
+        const uint64_t codec_epoch = current_video_codec_epoch.load();
+        const bool initial_video_is_h265 = current_video_is_h265.load();
         mux_renderer_init(render_logger, mux_filename.c_str(), false, true);
-        if (!mux_renderer_choose_video_codec(current_video_is_h265)) {
+        if (!mux_renderer_choose_video_codec(initial_video_is_h265)) {
             mux_renderer_destroy();
+            lock.unlock();
+            fail_recording_handoff("The AirPlay recording track could not start");
             return 0;
         }
+        mux_to_file = true;
+        if (current_video_codec_epoch.load() != codec_epoch &&
+            !mux_renderer_queue_video_codec(current_video_is_h265.load())) {
+            mux_to_file = false;
+            mux_renderer_stop();
+            mux_renderer_destroy();
+            lock.unlock();
+            fail_recording_handoff("The AirPlay recording track could not reconcile its starting codec");
+            return 0;
+        }
+    } else {
+        mux_to_file = true;
     }
-    mux_to_file = true;
     return 1;
 }
 
 extern "C" int uxplay_stop_recording() {
     {
         std::lock_guard<std::mutex> lock(mux_recording_mutex);
-        if (!mux_to_file) return 1;
+        if (!mux_to_file) return mux_recording_failed ? 0 : 1;
         mux_to_file = false;
     }
     bool clean = true;
@@ -297,7 +348,14 @@ extern "C" int uxplay_stop_recording() {
         mux_renderer_destroy();
     }
     if (recording_test_mode) clean = recording_test_stop_clean;
-    return clean ? 1 : 0;
+    if (!clean) fail_recording_handoff("The AirPlay recording track could not be finalized safely");
+    return clean && !mux_recording_failed ? 1 : 0;
+}
+
+extern "C" uxplay_recording_status uxplay_get_recording_status() {
+    if (mux_recording_failed || (mux_to_file && !recording_test_mode && mux_renderer_has_failed()))
+        return UXPLAY_RECORDING_FAILED;
+    return mux_to_file ? UXPLAY_RECORDING_ACTIVE : UXPLAY_RECORDING_INACTIVE;
 }
 
 extern "C" void uxplay_set_recording_test_mode(int enabled) {
@@ -306,6 +364,10 @@ extern "C" void uxplay_set_recording_test_mode(int enabled) {
 
 extern "C" void uxplay_set_recording_test_stop_result(int clean) {
     recording_test_stop_clean = clean != 0;
+}
+
+extern "C" void uxplay_set_recording_test_start_result(int allowed) {
+    recording_test_start_allowed = allowed != 0;
 }
 
 //Support for D-Bus-based screensaver inhibition (org.freedesktop.ScreenSaver) 
@@ -2293,14 +2355,21 @@ extern "C" int video_set_codec(void *cls, video_codec_t codec) {
     bool video_is_h265 = (codec == VIDEO_CODEC_H265);
     current_video_is_h265 = video_is_h265;
     mux_renderer_reset_video_cache();
-    std::lock_guard<std::mutex> lock(mux_recording_mutex);
+    current_video_codec_epoch.fetch_add(1);
     if (mux_to_file) {
-        mux_renderer_choose_video_codec(video_is_h265);
+        if (!mux_renderer_queue_video_codec(video_is_h265)) {
+            fail_recording_handoff("The AirPlay recording track could not accept a codec boundary");
+        }
     }
     if (!use_video) {
         return 0;
     }
-    return video_renderer_choose_codec(false, video_is_h265);
+    const int result = video_renderer_choose_codec(false, video_is_h265);
+    if (result != 0) {
+        emit_host_event(UXPLAY_EVENT_ERROR, NULL, NULL, NULL,
+                        "The embedded video pipeline could not start");
+    }
+    return result;
 }
 
 extern "C" void display_pin(void *cls, char *pin) {
@@ -2359,8 +2428,9 @@ extern "C" void conn_destroy (void *cls) {
             remove (dacpfile.c_str());
         }
         if (mux_to_file) {
-            std::lock_guard<std::mutex> lock(mux_recording_mutex);
-            if (mux_to_file) mux_renderer_stop();
+            if (!mux_renderer_queue_stop()) {
+                fail_recording_handoff("The AirPlay recording track could not queue reconnect finalization");
+            }
         }
     }
 }
@@ -2422,8 +2492,9 @@ extern "C" void audio_process (void *cls, raop_ntp_t *ntp, audio_decode_struct *
         dump_audio_to_file(data->data, data->data_len, (data->data)[0] & 0xf0);
     }
     if (mux_to_file) {
-        std::lock_guard<std::mutex> lock(mux_recording_mutex);
-        if (mux_to_file) mux_renderer_push_audio(data->data, data->data_len, data->ntp_time_remote);
+        if (!mux_renderer_push_audio(data->data, data->data_len, data->ntp_time_remote)) {
+            fail_recording_handoff("The AirPlay recording track stopped accepting audio");
+        }
     }
     if (use_audio) {
         if (!remote_clock_offset) {
@@ -2461,8 +2532,13 @@ extern "C" void video_process (void *cls, raop_ntp_t *ntp, video_decode_struct *
         mux_renderer_cache_video(data->data, data->data_len, current_video_is_h265);
     }
     if (mux_to_file) {
-        std::lock_guard<std::mutex> lock(mux_recording_mutex);
-        if (mux_to_file) mux_renderer_push_video(data->data, data->data_len, data->ntp_time_remote);
+        bool accepted = false;
+        if (!mux_renderer_push_video_with_acceptance(
+                data->data, data->data_len, data->ntp_time_remote, &accepted)) {
+            fail_recording_handoff("The AirPlay recording track stopped accepting video");
+        } else if (accepted) {
+            notify_recording_first_video();
+        }
     }
     if (use_video) {
         if (!remote_clock_offset) {
@@ -2591,8 +2667,9 @@ extern "C" void audio_get_format (void *cls, unsigned char *ct, unsigned short *
     }
 
     if (mux_to_file) {
-        std::lock_guard<std::mutex> lock(mux_recording_mutex);
-        if (mux_to_file) mux_renderer_choose_audio_codec(*ct);
+        if (!mux_renderer_choose_audio_codec(*ct)) {
+            fail_recording_handoff("The AirPlay recording track could not accept an audio codec boundary");
+        }
     }
 
     if (coverart_filename.length()) {
@@ -3429,8 +3506,9 @@ int start_uxplay (int argc, char *argv[]) {
             raop_set_port(raop, port);
         }
         if (mux_to_file) {
-            std::lock_guard<std::mutex> lock(mux_recording_mutex);
-            if (mux_to_file) mux_renderer_stop();
+            if (!mux_renderer_queue_stop()) {
+                fail_recording_handoff("The AirPlay recording track could not queue reconnect finalization");
+            }
         }
         goto reconnect;
     } else {
@@ -3455,6 +3533,8 @@ void stop_uxplay() {
 }
 
 static void cleanup() {
+    mux_to_file = false;
+    mux_renderer_destroy();
     if (use_audio) {
         audio_renderer_destroy();
     }

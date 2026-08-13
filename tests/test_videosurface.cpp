@@ -3,6 +3,10 @@
 
 #include <QtTest>
 
+namespace {
+void discardLog(void *, int, const char *) {}
+}
+
 class VideoSurfaceTest final : public QObject {
     Q_OBJECT
 
@@ -18,6 +22,52 @@ private slots:
                                     "decodebin", "videoconvert", "fakesink", "", false,
                                     false, false, false, 3, nullptr));
         video_renderer_destroy();
+        logger_destroy(logger);
+    }
+
+    void playingFailureIsRecoverableInsteadOfFatal() {
+        logger_t *logger = logger_init();
+        QVERIFY(logger);
+        logger_set_callback(logger, discardLog, nullptr);
+        videoflip_t transforms[2] = {NONE, NONE};
+        video_renderer_set_window_handle(0);
+        QVERIFY(video_renderer_init(logger, "UxPlay Studio failure test", transforms,
+                                    "h264parse", "", "decodebin", "videoconvert",
+                                    "fakesink", "", false, false, false, false,
+                                    3, nullptr));
+        video_renderer_test_fail_next_playing_transition();
+        QCOMPARE(video_renderer_choose_codec(false, false), -1);
+        video_renderer_destroy();
+        logger_destroy(logger);
+    }
+
+    void embeddedModeRejectsAutomaticSinkInsteadOfOpeningAnotherWindow() {
+        logger_t *logger = logger_init();
+        QVERIFY(logger);
+        logger_set_callback(logger, discardLog, nullptr);
+        videoflip_t transforms[2] = {NONE, NONE};
+        video_renderer_set_window_handle(1);
+        QVERIFY(!video_renderer_init(logger, "UxPlay Studio embedded test", transforms,
+                                     "h264parse", "", "decodebin", "videoconvert",
+                                     "autovideosink", "", false, false, false, false,
+                                     3, nullptr));
+        video_renderer_destroy();
+        video_renderer_set_window_handle(0);
+        logger_destroy(logger);
+    }
+
+    void embeddedModeRejectsUnavailableSinkInsteadOfFallingBack() {
+        logger_t *logger = logger_init();
+        QVERIFY(logger);
+        logger_set_callback(logger, discardLog, nullptr);
+        videoflip_t transforms[2] = {NONE, NONE};
+        video_renderer_set_window_handle(1);
+        QVERIFY(!video_renderer_init(logger, "UxPlay Studio missing sink test", transforms,
+                                     "h264parse", "", "decodebin", "videoconvert",
+                                     "uxplay-missing-video-sink", "", false, false,
+                                     false, false, 3, nullptr));
+        video_renderer_destroy();
+        video_renderer_set_window_handle(0);
         logger_destroy(logger);
     }
 

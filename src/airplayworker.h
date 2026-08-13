@@ -18,13 +18,13 @@ struct ReceiverEvent {
 
 Q_DECLARE_METATYPE(ReceiverEvent)
 
-class AirPlayWorker final : public QThread {
+class AirPlayWorker : public QThread {
     Q_OBJECT
 
 public:
     explicit AirPlayWorker(QObject *parent = nullptr);
     void configure(QStringList args, quintptr videoWindow);
-    void stopAirplay();
+    virtual void stopAirplay();
 
 signals:
     void engineStarted();

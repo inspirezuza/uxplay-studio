@@ -4,16 +4,36 @@
 
 #include <QTimer>
 #include <algorithm>
+#include <utility>
 
-ReceiverEngine::ReceiverEngine(QObject *parent) : QObject(parent) {
+ReceiverEngine::ReceiverEngine(QObject *parent)
+    : ReceiverEngine([]() { return new AirPlayWorker; }, 3000, parent) {}
+
+ReceiverEngine::ReceiverEngine(WorkerFactory workerFactory, int shutdownWaitMs,
+                               QObject *parent)
+    : QObject(parent),
+      m_workerFactory(std::move(workerFactory)),
+      m_shutdownWaitMs(std::max(0, shutdownWaitMs)) {
+    Q_ASSERT(m_workerFactory);
     qRegisterMetaType<ReceiverState>();
 }
 
 ReceiverEngine::~ReceiverEngine() {
     m_userStopping = true;
-    if (m_worker && m_worker->isRunning()) {
-        m_worker->stopAirplay();
-        m_worker->wait(3000);
+    AirPlayWorker *worker = m_worker.data();
+    if (!worker) {
+        return;
+    }
+
+    // The worker is deliberately unparented, so a bounded shutdown timeout
+    // can never make QObject destroy a QThread that is still running. Its
+    // callbacks target the worker; disconnecting the worker-to-engine signals
+    // keeps the engine out of every late callback path while the worker exits.
+    disconnect(worker, nullptr, this, nullptr);
+    m_worker = nullptr;
+    if (worker->isRunning()) {
+        worker->stopAirplay();
+        worker->wait(static_cast<unsigned long>(m_shutdownWaitMs));
     }
 }
 
@@ -70,7 +90,16 @@ void ReceiverEngine::launchWorker() {
         return;
     }
     transitionTo(ReceiverState::Starting);
-    auto *worker = new AirPlayWorker(this);
+    auto *worker = m_workerFactory();
+    Q_ASSERT(worker);
+    if (!worker) {
+        transitionTo(ReceiverState::Error);
+        return;
+    }
+    // QThread aborts if QObject ownership deletes it before run() returns.
+    // Keep it independent from ReceiverEngine and let the finished signal
+    // reclaim it only after the underlying thread has stopped.
+    worker->setParent(nullptr);
     m_worker = worker;
     worker->configure(m_config.uxplayArguments(m_bleStatusPath), m_videoWindow);
     connect(worker, &AirPlayWorker::receiverEvent, this, &ReceiverEngine::handleEvent,
@@ -102,6 +131,11 @@ void ReceiverEngine::handleEvent(const ReceiverEvent &event) {
         transitionTo(ReceiverState::Ready);
         break;
     case UXPLAY_EVENT_ERROR:
+        if (event.message.contains(QStringLiteral("recording"), Qt::CaseInsensitive)) {
+            // Recording errors are reported to the Studio session without
+            // tearing down a healthy live receiver.
+            break;
+        }
         transitionTo(ReceiverState::Error);
         break;
     case UXPLAY_EVENT_WARNING:

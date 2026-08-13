@@ -30,6 +30,16 @@ private slots:
         QVERIFY(state.moveTo(ReceiverState::Retrying));
         QVERIFY(state.moveTo(ReceiverState::Starting));
     }
+
+    void receiverToggleCancelsEveryActiveOrPendingState() {
+        QVERIFY(!receiverToggleStops(ReceiverState::Stopped));
+        QVERIFY(receiverToggleStops(ReceiverState::Starting));
+        QVERIFY(receiverToggleStops(ReceiverState::Ready));
+        QVERIFY(receiverToggleStops(ReceiverState::Connecting));
+        QVERIFY(receiverToggleStops(ReceiverState::Mirroring));
+        QVERIFY(receiverToggleStops(ReceiverState::Error));
+        QVERIFY(receiverToggleStops(ReceiverState::Retrying));
+    }
 };
 
 QTEST_GUILESS_MAIN(AppStateTest)

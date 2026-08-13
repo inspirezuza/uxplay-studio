@@ -30,14 +30,23 @@ extern "C" {
 #include "../lib/logger.h"
 
 void mux_renderer_init(logger_t *logger, const char *filename, bool use_audio, bool use_video);
-void mux_renderer_choose_audio_codec(unsigned char audio_ct);
+bool mux_renderer_choose_audio_codec(unsigned char audio_ct);
 bool mux_renderer_choose_video_codec(bool is_h265);
-void mux_renderer_push_video(unsigned char *data, int data_len, uint64_t ntp_time);
+bool mux_renderer_queue_video_codec(bool is_h265);
+bool mux_renderer_queue_stop(void);
+bool mux_renderer_push_video(unsigned char *data, int data_len, uint64_t ntp_time);
+bool mux_renderer_push_video_with_acceptance(unsigned char *data, int data_len,
+                                             uint64_t ntp_time, bool *accepted);
 void mux_renderer_cache_video(unsigned char *data, int data_len, bool is_h265);
 void mux_renderer_reset_video_cache(void);
-void mux_renderer_push_audio(unsigned char *data, int data_len, uint64_t ntp_time);
+bool mux_renderer_push_audio(unsigned char *data, int data_len, uint64_t ntp_time);
 bool mux_renderer_stop(void);
+bool mux_renderer_has_failed(void);
 void mux_renderer_destroy(void);
+
+/* Deterministic concurrency seams used only by focused handoff tests. */
+void mux_renderer_set_test_handoff_limits(unsigned int max_items, unsigned int max_bytes);
+void mux_renderer_set_test_consumer_delay(unsigned int delay_ms);
 
 #ifdef __cplusplus
 }

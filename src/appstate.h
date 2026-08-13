@@ -15,6 +15,7 @@ enum class ReceiverState {
 
 QString receiverStateLabel(ReceiverState state);
 QString receiverStateColor(ReceiverState state);
+bool receiverToggleStops(ReceiverState state);
 
 class ReceiverStateMachine {
 public:
