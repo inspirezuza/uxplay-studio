@@ -252,6 +252,17 @@ QWidget#studioDock {
     background: #1A1B1F;
     border-left: 1px solid #303239;
 }
+QSplitter#playerSplitter {
+    background: #101114;
+}
+QSplitter#playerSplitter::handle {
+    background: #2B2E35;
+    border-left: 1px solid #3A3D45;
+    border-right: 1px solid #17181B;
+}
+QSplitter#playerSplitter::handle:hover {
+    background: #5B8CFF;
+}
 QLabel#dockHeading { color: #FFFFFF; font-size: 15px; font-weight: 650; }
 QLabel#dockTitle {
     color: #858A96;

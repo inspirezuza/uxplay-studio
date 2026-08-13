@@ -349,6 +349,23 @@ void SceneCanvas::setSourcePreview(const QString &sourceId, const QImage &frame)
     }
 }
 
+bool SceneCanvas::deleteSelection() {
+    if (!m_document) return false;
+    bool removed = false;
+    for (const QString &id : selectedLayerIds()) {
+        const SceneLayer *layer = m_document->layer(m_format, id);
+        if (layer && !layer->locked) {
+            m_document->removeLayer(m_format, id);
+            removed = true;
+        }
+    }
+    if (!removed) return false;
+    rebuild();
+    emit layersChanged();
+    emit sceneChanged();
+    return true;
+}
+
 void SceneCanvas::rebuild() {
     const QStringList selected = selectedLayerIds();
     m_scene->clear();
@@ -414,13 +431,10 @@ void SceneCanvas::keyPressEvent(QKeyEvent *event) {
     else if (event->key() == Qt::Key_Right) delta.setX(step);
     else if (event->key() == Qt::Key_Up) delta.setY(-step);
     else if (event->key() == Qt::Key_Down) delta.setY(step);
-    else if (event->key() == Qt::Key_Delete && m_document) {
-        const QStringList ids = selectedLayerIds();
-        for (const QString &id : ids) {
-            const SceneLayer *layer = m_document->layer(m_format, id);
-            if (layer && !layer->locked) m_document->removeLayer(m_format, id);
-        }
-        rebuild(); emit sceneChanged(); event->accept(); return;
+    else if ((event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) && m_document) {
+        deleteSelection();
+        event->accept();
+        return;
     } else { QGraphicsView::keyPressEvent(event); return; }
     nudgeSelection(delta);
     event->accept();

@@ -23,6 +23,7 @@ class QPlainTextEdit;
 class QProcess;
 class QPushButton;
 class QStackedWidget;
+class QSplitter;
 class QSystemTrayIcon;
 class QTextEdit;
 class QThread;
@@ -51,6 +52,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
 
 private:
@@ -66,6 +68,7 @@ private:
     void setStudioMode(bool edit);
     void setSceneFormat(bool vertical);
     void setRecordingUiLocked(bool locked);
+    void deleteSelectedLayers();
     void addStudioSource(int type);
     void refreshLayerList();
     void refreshLayerInspector();
@@ -139,6 +142,7 @@ private:
     QHBoxLayout *m_playerPageLayout = nullptr;
     QVBoxLayout *m_playerLayout = nullptr;
     QWidget *m_sessionPanel = nullptr;
+    QSplitter *m_playerSplitter = nullptr;
     QWidget *m_transformPanel = nullptr;
     QLabel *m_sessionState = nullptr;
     QLabel *m_deviceName = nullptr;
@@ -196,6 +200,7 @@ private:
     QDoubleSpinBox *m_layerRotation = nullptr;
     QComboBox *m_layerOpacity = nullptr;
     QComboBox *m_layerMask = nullptr;
+    QAction *m_deleteLayerAction = nullptr;
     bool m_updatingInspector = false;
     int m_sceneFormat = 0;
     QList<QThread *> m_previewThreads;

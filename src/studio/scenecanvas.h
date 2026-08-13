@@ -38,9 +38,11 @@ public:
     QUndoStack *undoStack();
     void refreshFromDocument();
     void setSourcePreview(const QString &sourceId, const QImage &frame);
+    bool deleteSelection();
 
 signals:
     void sceneChanged();
+    void layersChanged();
     void layerSelectionChanged(const QStringList &layerIds);
 
 protected:

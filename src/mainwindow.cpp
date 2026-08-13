@@ -18,6 +18,7 @@
 
 #include <QAction>
 #include <QAbstractItemModel>
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -28,6 +29,7 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QEventLoop>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -38,6 +40,7 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -55,6 +58,7 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStackedWidget>
+#include <QSplitter>
 #include <QStyle>
 #include <QSystemTrayIcon>
 #include <QTextDocument>
@@ -440,6 +444,13 @@ void MainWindow::setStudioMode(bool edit) {
         edit = false;
     }
     m_previewStack->setCurrentIndex(edit ? 1 : 0);
+    // The camera self-view is a live-mode monitor. In Edit layout the camera
+    // is already rendered by its scene layer, so leaving this native overlay
+    // visible would show the same feed twice.
+    if (m_cameraSelfView) {
+        if (edit) m_cameraSelfView->hide();
+        else m_cameraSelfView->setActive(m_cameraSelfView->isActive());
+    }
     m_liveModeButton->setChecked(!edit);
     m_editModeButton->setChecked(edit);
     for (QPushButton *button : std::as_const(m_editActionButtons))
@@ -449,6 +460,34 @@ void MainWindow::setStudioMode(bool edit) {
     if (m_duration) m_duration->setVisible(!edit);
     if (m_recordButton) m_recordButton->setVisible(!edit);
     if (m_transformPanel) m_transformPanel->setVisible(edit);
+}
+
+void MainWindow::deleteSelectedLayers() {
+    if (!m_sceneCanvas || !m_pages || m_pages->currentIndex() != 0 ||
+        !m_previewStack || m_previewStack->currentIndex() != 1) {
+        return;
+    }
+    QWidget *focus = QApplication::focusWidget();
+    if (qobject_cast<QLineEdit *>(focus) || qobject_cast<QTextEdit *>(focus) ||
+        qobject_cast<QPlainTextEdit *>(focus) || qobject_cast<QAbstractSpinBox *>(focus) ||
+        qobject_cast<QComboBox *>(focus)) {
+        return;
+    }
+    if (!m_sceneCanvas->deleteSelection() && m_recordingStatus) {
+        m_recordingStatus->setText(QStringLiteral("Select an unlocked layer to delete"));
+    }
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (m_layerList && (watched == m_layerList || watched == m_layerList->viewport()) &&
+        event->type() == QEvent::KeyPress) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        if (key->key() == Qt::Key_Delete || key->key() == Qt::Key_Backspace) {
+            deleteSelectedLayers();
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::setRecordingUiLocked(bool locked) {
@@ -906,12 +945,11 @@ QWidget *MainWindow::createPlayerPage() {
     connect(m_fullscreenButton, &QPushButton::clicked, this, &MainWindow::enterFullscreen);
     controls->addWidget(m_fullscreenButton);
     m_playerLayout->addWidget(m_playerControls);
-    m_playerPageLayout->addWidget(m_playerCard, 1);
 
     m_sessionPanel = card(m_playerPage);
     m_sessionPanel->setObjectName(QStringLiteral("studioDock"));
     m_sessionPanel->setMinimumWidth(310);
-    m_sessionPanel->setMaximumWidth(348);
+    m_sessionPanel->setMaximumWidth(600);
     auto *dock = new QVBoxLayout(m_sessionPanel);
     dock->setContentsMargins(16, 16, 16, 14);
     dock->setSpacing(8);
@@ -978,6 +1016,7 @@ QWidget *MainWindow::createPlayerPage() {
     down->setToolTip(QStringLiteral("Move layer backward"));
     lock->setToolTip(QStringLiteral("Lock or unlock layer"));
     remove->setToolTip(QStringLiteral("Remove layer"));
+    remove->setAccessibleName(QStringLiteral("deleteLayerButton"));
     layerRow->addStretch();
     dock->addLayout(layerRow);
     m_transformPanel = new QWidget(m_sessionPanel);
@@ -1090,7 +1129,17 @@ QWidget *MainWindow::createPlayerPage() {
     controls->insertWidget(6, m_recordMicrophone);
     controls->insertWidget(7, m_duration);
     controls->insertWidget(8, m_recordButton);
-    m_playerPageLayout->addWidget(m_sessionPanel);
+    m_playerSplitter = new QSplitter(Qt::Horizontal, m_playerPage);
+    m_playerSplitter->setObjectName(QStringLiteral("playerSplitter"));
+    m_playerSplitter->setHandleWidth(8);
+    m_playerSplitter->setChildrenCollapsible(false);
+    m_playerSplitter->setAccessibleName(QStringLiteral("studioWorkspaceSplitter"));
+    m_playerSplitter->setStretchFactor(0, 1);
+    m_playerSplitter->setStretchFactor(1, 0);
+    m_playerSplitter->addWidget(m_playerCard);
+    m_playerSplitter->addWidget(m_sessionPanel);
+    m_playerSplitter->setSizes({900, 348});
+    m_playerPageLayout->addWidget(m_playerSplitter);
 
     connect(m_layerList, &QListWidget::itemSelectionChanged, this, [this]() {
         m_sceneCanvas->clearLayerSelection();
@@ -1118,6 +1167,8 @@ QWidget *MainWindow::createPlayerPage() {
             m_layerList->item(i)->setSelected(ids.contains(m_layerList->item(i)->data(Qt::UserRole).toString()));
         refreshLayerInspector();
     });
+    m_layerList->installEventFilter(this);
+    m_layerList->viewport()->installEventFilter(this);
     connect(m_sourceList, &QListWidget::currentItemChanged, this,
             [this](QListWidgetItem *current, QListWidgetItem *) {
         if (!current || !m_layerList || !m_sceneDocument) return;
@@ -1133,6 +1184,9 @@ QWidget *MainWindow::createPlayerPage() {
     connect(m_sceneCanvas, &SceneCanvas::sceneChanged, this, [this]() {
         refreshLayerInspector();
         saveCurrentProject();
+    });
+    connect(m_sceneCanvas, &SceneCanvas::layersChanged, this, [this]() {
+        refreshLayerList();
     });
     connect(m_layerOpacity, &QComboBox::currentIndexChanged, this, [this](int) {
         if (!m_updatingInspector && m_layerOpacity)
@@ -1165,16 +1219,20 @@ QWidget *MainWindow::createPlayerPage() {
         }
     });
     connect(remove, &QPushButton::clicked, this, [this]() {
-        if (auto *item = m_layerList->currentItem()) {
-            const QString id = item->data(Qt::UserRole).toString();
-            const SceneLayer *layer = m_sceneDocument->layer(
-                static_cast<SceneFormat>(m_sceneFormat), id);
-            if (!layer || layer->locked) return;
-            m_sceneDocument->removeLayer(static_cast<SceneFormat>(m_sceneFormat), id);
-            m_sceneCanvas->setDocument(m_sceneDocument.get(), static_cast<SceneFormat>(m_sceneFormat));
-            refreshLayerList(); saveCurrentProject();
+        if (auto *item = m_layerList->currentItem(); item &&
+            m_sceneCanvas->selectedLayerIds().isEmpty()) {
+            m_sceneCanvas->selectLayer(item->data(Qt::UserRole).toString());
         }
+        deleteSelectedLayers();
     });
+    m_deleteLayerAction = new QAction(QStringLiteral("Delete selected layer(s)"), this);
+    m_deleteLayerAction->setObjectName(QStringLiteral("deleteLayerAction"));
+    m_deleteLayerAction->setShortcuts({QKeySequence(Qt::Key_Delete),
+                                       QKeySequence(Qt::Key_Backspace)});
+    m_deleteLayerAction->setShortcutContext(Qt::WindowShortcut);
+    m_deleteLayerAction->setToolTip(QStringLiteral("Delete selected layer(s) (Delete / Backspace)"));
+    connect(m_deleteLayerAction, &QAction::triggered, this, [this]() { deleteSelectedLayers(); });
+    addAction(m_deleteLayerAction);
     refreshLayerList();
     return m_playerPage;
 }

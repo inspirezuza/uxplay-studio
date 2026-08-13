@@ -95,6 +95,26 @@ private slots:
         canvas.undoStack()->redo();
         QCOMPARE(document.layer(SceneFormat::Wide, layer)->transform, edited);
     }
+
+    void deleteSelectionSkipsLockedLayers() {
+        SceneDocument document;
+        const QString first = document.addSource(SceneSourceType::Text, QStringLiteral("First"));
+        const QString second = document.addSource(SceneSourceType::Text, QStringLiteral("Second"));
+        const QString firstLayer = document.addLayer(SceneFormat::Wide, first);
+        const QString secondLayer = document.addLayer(SceneFormat::Wide, second);
+        QVERIFY(document.setLayerLocked(SceneFormat::Wide, firstLayer, true));
+
+        SceneCanvas canvas;
+        canvas.setDocument(&document, SceneFormat::Wide);
+        QVERIFY(canvas.selectLayer(firstLayer));
+        QVERIFY(!canvas.deleteSelection());
+        QCOMPARE(document.composition(SceneFormat::Wide).layers.size(), 2);
+
+        QVERIFY(canvas.selectLayer(secondLayer));
+        QVERIFY(canvas.deleteSelection());
+        QCOMPARE(document.composition(SceneFormat::Wide).layers.size(), 1);
+        QCOMPARE(document.composition(SceneFormat::Wide).layers.first().id, firstLayer);
+    }
 };
 
 QTEST_MAIN(SceneCanvasTest)

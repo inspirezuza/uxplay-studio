@@ -13,6 +13,7 @@
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSplitter>
 #include <QTemporaryDir>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -145,16 +146,20 @@ private slots:
 
         auto *sidebar = window.findChild<QWidget *>(QStringLiteral("sidebar"));
         auto *sessionPanel = window.findChild<QWidget *>(QStringLiteral("studioDock"));
+        auto *splitter = window.findChild<QSplitter *>(QStringLiteral("playerSplitter"));
         auto *controls = window.findChild<QWidget *>(QStringLiteral("playerControls"));
         auto *record = window.findChild<QPushButton *>(QStringLiteral("recordButton"));
         auto *status = window.findChild<QLabel *>(QStringLiteral("statusBadge"));
         QVERIFY(sidebar);
         QVERIFY(sessionPanel);
+        QVERIFY(splitter);
         QVERIFY(controls);
         QVERIFY(record);
         QVERIFY(status);
         QCOMPARE(sidebar->width(), 112);
-        QVERIFY(sessionPanel->maximumWidth() <= 348);
+        QCOMPARE(splitter->count(), 2);
+        QVERIFY(sessionPanel->minimumWidth() >= 280);
+        QVERIFY(sessionPanel->maximumWidth() >= 500);
         QCOMPARE(record->parentWidget(), controls);
         QCOMPARE(window.findChildren<QPushButton *>(QStringLiteral("navButton")).size(), 3);
         QCOMPARE(window.findChildren<QWidget *>(QStringLiteral("connectStep")).size(), 3);
@@ -168,7 +173,22 @@ private slots:
         QVERIFY(edit);
         QTest::mouseClick(edit, Qt::LeftButton);
         QCoreApplication::processEvents();
+        auto *selfView = window.findChild<CameraSelfView *>(QStringLiteral("cameraSelfView"));
+        QVERIFY(!selfView->isVisible());
+        selfView->setFrame(QImage(320, 180, QImage::Format_ARGB32));
+        selfView->setActive(true);
+        auto *live = window.findChild<QPushButton *>(QStringLiteral("segmentedButton"));
+        QVERIFY(live);
+        QTest::mouseClick(live, Qt::LeftButton);
+        QCoreApplication::processEvents();
+        QVERIFY(selfView->isVisible());
+        QTest::mouseClick(edit, Qt::LeftButton);
+        QCoreApplication::processEvents();
         QVERIFY(controls->minimumSizeHint().width() <= controls->width());
+        const int originalDockWidth = splitter->sizes().value(1);
+        splitter->setSizes({qMax(1, splitter->width() - 500), 500});
+        QCoreApplication::processEvents();
+        QVERIFY(splitter->sizes().value(1) > originalDockWidth);
         auto *layers = window.findChild<QListWidget *>(QStringLiteral("layerList"));
         auto *canvas = window.findChild<SceneCanvas *>(QStringLiteral("sceneCanvas"));
         QVERIFY(layers);
@@ -183,6 +203,66 @@ private slots:
         xField->setValue(120.0);
         QCOMPARE(canvas->document()->layer(SceneFormat::Wide, layerId)->transform.frame.x(), 120.0);
         QVERIFY(canvas->undoStack()->canUndo());
+    }
+
+    void deleteButtonAndShortcutsRemoveOnlyUnlockedLayers() {
+        QTemporaryDir projects;
+        ProjectStore store(QDir(projects.path()).filePath(QStringLiteral("UxPlay Studio")));
+        SceneDocument document;
+        const QString airplay = document.addSource(SceneSourceType::AirPlay, QStringLiteral("iPad"));
+        const QString title = document.addSource(SceneSourceType::Text, QStringLiteral("Title"));
+        const QString color = document.addSource(SceneSourceType::Color, QStringLiteral("Backdrop"));
+        document.addLayer(SceneFormat::Wide, airplay);
+        document.addLayer(SceneFormat::Wide, title);
+        document.addLayer(SceneFormat::Wide, color);
+        const auto created = store.create(document);
+        QVERIFY(created.ok());
+
+        MainWindow window(nullptr, false, projects.path());
+        window.show();
+        QTRY_VERIFY(window.isVisible());
+        QPushButton *projectsButton = nullptr;
+        for (QPushButton *button : window.findChildren<QPushButton *>()) {
+            if (button->text() == QStringLiteral("Projects")) projectsButton = button;
+        }
+        QVERIFY(projectsButton);
+        QTest::mouseClick(projectsButton, Qt::LeftButton);
+        auto *projectList = window.findChild<QListWidget *>(QStringLiteral("projectList"));
+        QPushButton *openButton = nullptr;
+        for (QPushButton *button : window.findChildren<QPushButton *>()) {
+            if (button->accessibleName() == QStringLiteral("openProjectButton")) openButton = button;
+        }
+        QVERIFY(projectList);
+        QVERIFY(openButton);
+        projectList->setCurrentRow(0);
+        QTest::mouseClick(openButton, Qt::LeftButton);
+
+        auto *layers = window.findChild<QListWidget *>(QStringLiteral("layerList"));
+        QPushButton *deleteButton = nullptr;
+        for (QPushButton *button : window.findChildren<QPushButton *>()) {
+            if (button->accessibleName() == QStringLiteral("deleteLayerButton")) deleteButton = button;
+        }
+        QVERIFY(layers);
+        QVERIFY(deleteButton);
+        QCOMPARE(layers->count(), 3);
+        layers->setCurrentRow(0);
+        QTest::mouseClick(deleteButton, Qt::LeftButton);
+        QCOMPARE(layers->count(), 2);
+
+        layers->setCurrentRow(0);
+        QTest::keyClick(layers, Qt::Key_Delete);
+        QCOMPARE(layers->count(), 1);
+
+        layers->setCurrentRow(0);
+        QPushButton *lockButton = nullptr;
+        for (QPushButton *button : window.findChildren<QPushButton *>()) {
+            if (button->toolTip() == QStringLiteral("Lock or unlock layer")) lockButton = button;
+        }
+        QVERIFY(lockButton);
+        QTest::mouseClick(lockButton, Qt::LeftButton);
+        QTest::keyClick(layers, Qt::Key_Backspace);
+        QCOMPARE(layers->count(), 1);
+        QVERIFY(store.load(created.project.directory).document->composition(SceneFormat::Wide).layers.size() == 1);
     }
 
     void closingTheMainWindowDoesNotLeaveATrayOnlyInstance() {
