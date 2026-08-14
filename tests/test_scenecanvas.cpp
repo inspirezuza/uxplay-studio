@@ -115,6 +115,29 @@ private slots:
         QCOMPARE(document.composition(SceneFormat::Wide).layers.size(), 1);
         QCOMPARE(document.composition(SceneFormat::Wide).layers.first().id, firstLayer);
     }
+
+    void zoomControlsDoNotChangeSceneCoordinates() {
+        SceneDocument document;
+        const QString source = document.addSource(SceneSourceType::Color,
+                                                   QStringLiteral("Background"));
+        document.addLayer(SceneFormat::Wide, source);
+
+        SceneCanvas canvas;
+        canvas.resize(960, 600);
+        canvas.setDocument(&document, SceneFormat::Wide);
+        const QRectF sceneBounds = canvas.sceneRect();
+        QCOMPARE(canvas.zoomPercent(), 100);
+
+        canvas.zoomOut();
+        QVERIFY(canvas.zoomPercent() < 100);
+        QCOMPARE(canvas.sceneRect(), sceneBounds);
+        canvas.zoomIn();
+        QCOMPARE(canvas.zoomPercent(), 100);
+        canvas.zoomOut();
+        canvas.fitCanvas();
+        QCOMPARE(canvas.zoomPercent(), 100);
+        QCOMPARE(canvas.sceneRect(), sceneBounds);
+    }
 };
 
 QTEST_MAIN(SceneCanvasTest)

@@ -206,6 +206,68 @@ private slots:
         QVERIFY(canvas->undoStack()->canUndo());
     }
 
+    void dockListsAndCanvasViewHaveVisibleResizeAndZoomControls() {
+        MainWindow window(nullptr, false);
+        window.resize(1440, 880);
+        window.show();
+        QTRY_VERIFY(window.isVisible());
+
+        QPushButton *edit = nullptr;
+        for (QPushButton *button : window.findChildren<QPushButton *>())
+            if (button->text() == QStringLiteral("Edit layout")) edit = button;
+        QVERIFY(edit);
+        QTest::mouseClick(edit, Qt::LeftButton);
+        QCoreApplication::processEvents();
+
+        auto *sourceSplitter = window.findChild<QSplitter *>(QStringLiteral("sourceAreaSplitter"));
+        auto *layerSplitter = window.findChild<QSplitter *>(QStringLiteral("layerAreaSplitter"));
+        auto *canvas = window.findChild<SceneCanvas *>(QStringLiteral("sceneCanvas"));
+        auto *zoomOut = window.findChild<QPushButton *>(QStringLiteral("zoomOutButton"));
+        auto *fitCanvas = window.findChild<QPushButton *>(QStringLiteral("fitCanvasButton"));
+        auto *zoomLabel = window.findChild<QLabel *>(QStringLiteral("zoomLabel"));
+        auto *hint = window.findChild<QLabel *>(QStringLiteral("stageHint"));
+        QVERIFY(sourceSplitter);
+        QVERIFY(layerSplitter);
+        QVERIFY(canvas);
+        QVERIFY(zoomOut);
+        QVERIFY(fitCanvas);
+        QVERIFY(zoomLabel);
+        QVERIFY(hint);
+        QCOMPARE(sourceSplitter->orientation(), Qt::Vertical);
+        QCOMPARE(layerSplitter->orientation(), Qt::Vertical);
+        QCOMPARE(sourceSplitter->count(), 2);
+        QCOMPARE(layerSplitter->count(), 2);
+        auto *sources = window.findChild<QListWidget *>(QStringLiteral("sourceList"));
+        QVERIFY(sources);
+        QVERIFY(sources->item(0)->text().contains(QStringLiteral("OFFLINE")));
+
+        const QList<int> sourceBefore = sourceSplitter->sizes();
+        QVERIFY(sourceBefore.at(0) <= 260);
+        sourceSplitter->setSizes({sourceBefore.at(0) + 48, qMax(1, sourceBefore.at(1) - 48)});
+        QCoreApplication::processEvents();
+        QVERIFY(sourceSplitter->sizes().at(0) > sourceBefore.at(0));
+
+        const QList<int> layerBefore = layerSplitter->sizes();
+        QVERIFY(layerBefore.at(0) >= 120);
+        const int layerDelta = layerBefore.at(0) > 120 ? -48 : 48;
+        layerSplitter->setSizes({qMax(1, layerBefore.at(0) + layerDelta),
+                                 qMax(1, layerBefore.at(1) - layerDelta)});
+        QCoreApplication::processEvents();
+        if (layerDelta < 0)
+            QVERIFY(layerSplitter->sizes().at(0) < layerBefore.at(0));
+        else
+            QVERIFY(layerSplitter->sizes().at(0) > layerBefore.at(0));
+
+        QCOMPARE(canvas->zoomPercent(), 100);
+        QVERIFY(hint->text().contains(QStringLiteral("Canvas 1920 × 1080")));
+        QTest::mouseClick(zoomOut, Qt::LeftButton);
+        QVERIFY(canvas->zoomPercent() < 100);
+        QCOMPARE(zoomLabel->text(), QStringLiteral("%1%").arg(canvas->zoomPercent()));
+        QTest::mouseClick(fitCanvas, Qt::LeftButton);
+        QCOMPARE(canvas->zoomPercent(), 100);
+        QCOMPARE(zoomLabel->text(), QStringLiteral("100%"));
+    }
+
     void inspectorReflectsSelectedLayerOpacityAndMask() {
         MainWindow window(nullptr, false);
         window.show();

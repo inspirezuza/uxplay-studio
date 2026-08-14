@@ -263,6 +263,47 @@ QSplitter#playerSplitter::handle {
 QSplitter#playerSplitter::handle:hover {
     background: #5B8CFF;
 }
+QSplitter#sourceAreaSplitter::handle,
+QSplitter#layerAreaSplitter::handle {
+    background: #2B2E35;
+    border-top: 1px solid #3A3D45;
+    border-bottom: 1px solid #17181B;
+}
+QSplitter#sourceAreaSplitter::handle:hover,
+QSplitter#layerAreaSplitter::handle:hover {
+    background: #5B8CFF;
+}
+QWidget#canvasViewControls { background: transparent; }
+QScrollArea#layerInspectorScroll,
+QWidget#layerInspectorContent { background: transparent; border: 0; }
+QPushButton#zoomOutButton,
+QPushButton#zoomInButton,
+QPushButton#fitCanvasButton {
+    min-height: 30px;
+    max-height: 30px;
+    background: #22242A;
+    border: 1px solid #353840;
+    border-radius: 7px;
+    color: #D9DCE3;
+    font-size: 11px;
+    font-weight: 650;
+    padding: 0 7px;
+}
+QPushButton#zoomOutButton,
+QPushButton#zoomInButton { min-width: 30px; max-width: 30px; padding: 0; font-size: 15px; }
+QPushButton#zoomOutButton:hover,
+QPushButton#zoomInButton:hover,
+QPushButton#fitCanvasButton:hover {
+    background: #2C2F36;
+    border-color: #5B8CFF;
+    color: #FFFFFF;
+}
+QLabel#zoomLabel {
+    color: #E4E7EE;
+    font-family: "Cascadia Mono", "Consolas";
+    font-size: 10px;
+    font-weight: 700;
+}
 QLabel#dockHeading { color: #FFFFFF; font-size: 15px; font-weight: 650; }
 QLabel#dockTitle {
     color: #858A96;

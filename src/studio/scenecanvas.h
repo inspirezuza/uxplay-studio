@@ -8,6 +8,9 @@
 #include <QStringList>
 #include <QUndoStack>
 
+class QPainter;
+class QWheelEvent;
+
 class SceneCanvas final : public QGraphicsView {
     Q_OBJECT
 
@@ -20,6 +23,15 @@ public:
     SceneFormat format() const;
     void setFormat(SceneFormat format);
     QSize canvasSize() const;
+
+    // View controls are deliberately separate from layer transforms.  The
+    // canvas can be zoomed out below the fit-to-window level without changing
+    // the scene document, which makes the full composition boundary easy to
+    // inspect on small workspaces.
+    void fitCanvas();
+    void zoomIn();
+    void zoomOut();
+    int zoomPercent() const;
 
     bool selectLayer(const QString &layerId, bool add = false);
     QStringList selectedLayerIds() const;
@@ -44,13 +56,16 @@ signals:
     void sceneChanged();
     void layersChanged();
     void layerSelectionChanged(const QStringList &layerIds);
+    void zoomChanged(int percent);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void wheelEvent(QWheelEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void drawForeground(QPainter *painter, const QRectF &rect) override;
 
 private:
     enum class Interaction { None, Move, Resize, Crop, Rotate };
@@ -66,6 +81,8 @@ private:
     LayerItem *layerItemAt(const QPoint &viewPosition) const;
     QRectF snappedFrame(const QRectF &frame, bool disableSnap) const;
     void emitSelection();
+    void zoomBy(qreal factor, const QPoint *viewAnchor = nullptr);
+    void emitZoomChanged();
 
     QGraphicsScene *m_scene = nullptr;
     SceneDocument *m_document = nullptr;
@@ -73,6 +90,8 @@ private:
     QHash<QString, LayerItem *> m_items;
     QHash<QString, QImage> m_sourcePreviews;
     QUndoStack m_undoStack;
+    qreal m_viewScale = 1.0;
+    bool m_autoFit = true;
     bool m_snapEnabled = true;
     Interaction m_interaction = Interaction::None;
     QString m_activeLayer;

@@ -34,6 +34,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGuiApplication>
 #include <QGridLayout>
 #include <QImage>
@@ -90,6 +91,19 @@ QWidget *card(QWidget *parent = nullptr) {
     widget->setObjectName(QStringLiteral("card"));
     return widget;
 }
+
+// QScrollArea normally advertises the full minimum size of its child.  That
+// is useful in a standalone form, but in the nested layer splitter it would
+// consume all available height and leave the layer list at its 72px minimum.
+// The inspector can scroll, so its splitter-facing size hint should be
+// intentionally zero; the splitter's user-controlled sizes then win.
+class InspectorScrollArea final : public QScrollArea {
+public:
+    using QScrollArea::QScrollArea;
+
+    QSize sizeHint() const override { return QSize(0, 0); }
+    QSize minimumSizeHint() const override { return QSize(0, 0); }
+};
 
 void refreshStyle(QWidget *widget) {
     if (!widget) return;
@@ -455,6 +469,7 @@ void MainWindow::setStudioMode(bool edit) {
     m_editModeButton->setChecked(edit);
     for (QPushButton *button : std::as_const(m_editActionButtons))
         button->setVisible(edit);
+    if (m_canvasViewControls) m_canvasViewControls->setVisible(edit);
     if (m_recordCamera) m_recordCamera->setVisible(!edit);
     if (m_recordMicrophone) m_recordMicrophone->setVisible(!edit);
     if (m_duration) m_duration->setVisible(!edit);
@@ -517,6 +532,7 @@ void MainWindow::setSceneFormat(bool vertical) {
     m_verticalButton->setChecked(vertical);
     m_sceneCanvas->setFormat(static_cast<SceneFormat>(m_sceneFormat));
     refreshLayerList();
+    updateCanvasHint();
     setStudioMode(true);
 }
 
@@ -568,6 +584,24 @@ void MainWindow::addStudioSource(int type) {
 
 void MainWindow::refreshLayerList() {
     if (!m_sourceList || !m_layerList || !m_sceneDocument) return;
+    const auto sourceStatus = [this](SceneSourceType type) {
+        if (type == SceneSourceType::AirPlay && m_engine) {
+            switch (m_engine->state()) {
+            case ReceiverState::Stopped: return QStringLiteral("OFFLINE");
+            case ReceiverState::Starting: return QStringLiteral("STARTING");
+            case ReceiverState::Ready: return QStringLiteral("READY");
+            case ReceiverState::Connecting: return QStringLiteral("CONNECTING");
+            case ReceiverState::Mirroring: return QStringLiteral("LIVE");
+            case ReceiverState::Error: return QStringLiteral("ERROR");
+            case ReceiverState::Retrying: return QStringLiteral("RECONNECTING");
+            }
+        }
+        if (type == SceneSourceType::Camera && m_cameraPreviewEngine &&
+            m_cameraPreviewEngine->isRunning()) {
+            return QStringLiteral("PREVIEW");
+        }
+        return QStringLiteral("READY");
+    };
     {
         QSignalBlocker sourceBlocker(m_sourceList);
         m_sourceList->clear();
@@ -582,7 +616,8 @@ void MainWindow::refreshLayerList() {
             case SceneSourceType::Color: kind = QStringLiteral("COLOR"); icon = QStringLiteral("color"); break;
             }
             auto *item = new QListWidgetItem(StudioVisuals::icon(icon),
-                QStringLiteral("%1\n%2 · Ready").arg(source.name, kind), m_sourceList);
+                QStringLiteral("%1\n%2 · %3").arg(source.name, kind, sourceStatus(source.type)),
+                m_sourceList);
             item->setData(Qt::UserRole, source.id);
             item->setSizeHint(QSize(0, 54));
         }
@@ -645,6 +680,20 @@ void MainWindow::refreshLayerInspector() {
         m_layerMask->setCurrentIndex(index >= 0 ? index : 0);
     }
     m_updatingInspector = false;
+}
+
+void MainWindow::updateCanvasHint() {
+    if (!m_stageHint || !m_sceneCanvas) return;
+    const QSize size = m_sceneCanvas->canvasSize();
+    if (!size.isValid()) return;
+    m_stageHint->setText(
+        QStringLiteral("Canvas %1 × %2 · %3% · Drag to move · corner handles resize · "
+                       "Alt+drag crops · Ctrl+wheel zooms · Ctrl+0 fits · "
+                       "drag dock separators to resize")
+            .arg(size.width())
+            .arg(size.height())
+            .arg(m_sceneCanvas->zoomPercent()));
+    if (m_zoomLabel) m_zoomLabel->setText(QStringLiteral("%1%").arg(m_sceneCanvas->zoomPercent()));
 }
 
 void MainWindow::refreshProjectList() {
@@ -894,6 +943,8 @@ QWidget *MainWindow::createPlayerPage() {
     m_sceneCanvas->setDocument(m_sceneDocument.get(), SceneFormat::Wide);
     m_previewStack->addWidget(m_videoSurface);
     m_previewStack->addWidget(m_sceneCanvas);
+    connect(m_sceneCanvas, &SceneCanvas::zoomChanged, this,
+            [this](int) { updateCanvasHint(); });
     m_stageFrame = new QWidget(m_playerCard);
     m_stageFrame->setObjectName(QStringLiteral("stageFrame"));
     m_stageLayout = new QVBoxLayout(m_stageFrame);
@@ -901,12 +952,18 @@ QWidget *MainWindow::createPlayerPage() {
     m_stageLayout->setContentsMargins(20, 18, 20, 12);
     m_stageLayout->setSpacing(8);
     m_stageLayout->addWidget(m_previewStack, 1);
-    m_stageHint = new QLabel(
-        QStringLiteral("Drag to move · corner handles resize · Alt+drag crops · Ctrl disables snap"),
-        m_stageFrame);
+    m_stageFooter = new QWidget(m_stageFrame);
+    m_stageFooter->setObjectName(QStringLiteral("stageFooter"));
+    auto *stageFooterLayout = new QHBoxLayout(m_stageFooter);
+    stageFooterLayout->setContentsMargins(0, 0, 0, 0);
+    stageFooterLayout->setSpacing(8);
+    m_stageHint = new QLabel(m_stageFooter);
     m_stageHint->setObjectName(QStringLiteral("stageHint"));
     m_stageHint->setAlignment(Qt::AlignCenter);
-    m_stageLayout->addWidget(m_stageHint);
+    m_stageHint->setWordWrap(true);
+    m_stageHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    stageFooterLayout->addWidget(m_stageHint, 1);
+    m_stageLayout->addWidget(m_stageFooter);
     m_playerLayout->addWidget(m_stageFrame, 1);
     m_cameraSelfView = new CameraSelfView(m_previewStack);
 
@@ -929,12 +986,66 @@ QWidget *MainWindow::createPlayerPage() {
         auto *button = new QPushButton(compactText, m_playerControls);
         button->setObjectName(QStringLiteral("dockButton"));
         button->setToolTip(command.first);
+        // Keep the edit toolbar usable beside the zoom controls at the
+        // smallest supported window size.  The full action names remain in
+        // tooltips, while the compact buttons preserve the stage width.
+        button->setFixedWidth(commandIndex < 2 ? 34 : 58);
         button->setVisible(false);
         connect(button, &QPushButton::clicked, this, command.second);
         controls->addWidget(button);
         m_editActionButtons.append(button);
         ++commandIndex;
     }
+    m_canvasViewControls = new QWidget(m_stageFooter);
+    m_canvasViewControls->setObjectName(QStringLiteral("canvasViewControls"));
+    auto *viewControls = new QHBoxLayout(m_canvasViewControls);
+    viewControls->setContentsMargins(4, 0, 4, 0);
+    viewControls->setSpacing(3);
+    auto *viewLabel = new QLabel(QStringLiteral("VIEW"), m_canvasViewControls);
+    viewLabel->setObjectName(QStringLiteral("detailKey"));
+    viewControls->addWidget(viewLabel);
+    m_zoomOutButton = new QPushButton(QStringLiteral("−"), m_canvasViewControls);
+    m_zoomOutButton->setObjectName(QStringLiteral("zoomOutButton"));
+    m_zoomOutButton->setAccessibleName(QStringLiteral("zoomOutButton"));
+    m_zoomOutButton->setToolTip(QStringLiteral("Zoom out (Ctrl−wheel / Ctrl+-)"));
+    m_zoomOutButton->setFixedWidth(30);
+    m_zoomLabel = new QLabel(QStringLiteral("100%"), m_canvasViewControls);
+    m_zoomLabel->setObjectName(QStringLiteral("zoomLabel"));
+    m_zoomLabel->setAlignment(Qt::AlignCenter);
+    m_zoomLabel->setMinimumWidth(38);
+    m_zoomInButton = new QPushButton(QStringLiteral("+"), m_canvasViewControls);
+    m_zoomInButton->setObjectName(QStringLiteral("zoomInButton"));
+    m_zoomInButton->setAccessibleName(QStringLiteral("zoomInButton"));
+    m_zoomInButton->setToolTip(QStringLiteral("Zoom in (Ctrl−wheel / Ctrl++)"));
+    m_zoomInButton->setFixedWidth(30);
+    m_fitCanvasButton = new QPushButton(QStringLiteral("Fit"), m_canvasViewControls);
+    m_fitCanvasButton->setObjectName(QStringLiteral("fitCanvasButton"));
+    m_fitCanvasButton->setAccessibleName(QStringLiteral("fitCanvasButton"));
+    m_fitCanvasButton->setToolTip(QStringLiteral("Fit the complete canvas to the workspace (Ctrl+0)"));
+    viewControls->addWidget(m_zoomOutButton);
+    viewControls->addWidget(m_zoomLabel);
+    viewControls->addWidget(m_zoomInButton);
+    viewControls->addWidget(m_fitCanvasButton);
+    connect(m_zoomOutButton, &QPushButton::clicked, m_sceneCanvas, &SceneCanvas::zoomOut);
+    connect(m_zoomInButton, &QPushButton::clicked, m_sceneCanvas, &SceneCanvas::zoomIn);
+    connect(m_fitCanvasButton, &QPushButton::clicked, m_sceneCanvas, &SceneCanvas::fitCanvas);
+    auto *zoomInAction = new QAction(QStringLiteral("Zoom in canvas"), this);
+    zoomInAction->setShortcut(QKeySequence::ZoomIn);
+    zoomInAction->setShortcutContext(Qt::WindowShortcut);
+    connect(zoomInAction, &QAction::triggered, m_sceneCanvas, &SceneCanvas::zoomIn);
+    addAction(zoomInAction);
+    auto *zoomOutAction = new QAction(QStringLiteral("Zoom out canvas"), this);
+    zoomOutAction->setShortcut(QKeySequence::ZoomOut);
+    zoomOutAction->setShortcutContext(Qt::WindowShortcut);
+    connect(zoomOutAction, &QAction::triggered, m_sceneCanvas, &SceneCanvas::zoomOut);
+    addAction(zoomOutAction);
+    auto *fitCanvasAction = new QAction(QStringLiteral("Fit canvas to view"), this);
+    fitCanvasAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_0));
+    fitCanvasAction->setShortcutContext(Qt::WindowShortcut);
+    connect(fitCanvasAction, &QAction::triggered, m_sceneCanvas, &SceneCanvas::fitCanvas);
+    addAction(fitCanvasAction);
+    m_canvasViewControls->hide();
+    stageFooterLayout->addWidget(m_canvasViewControls);
     controls->addStretch();
     m_fullscreenButton = new QPushButton(m_playerControls);
     m_fullscreenButton->setObjectName(QStringLiteral("fullscreenButton"));
@@ -945,6 +1056,7 @@ QWidget *MainWindow::createPlayerPage() {
     connect(m_fullscreenButton, &QPushButton::clicked, this, &MainWindow::enterFullscreen);
     controls->addWidget(m_fullscreenButton);
     m_playerLayout->addWidget(m_playerControls);
+    updateCanvasHint();
 
     m_sessionPanel = card(m_playerPage);
     m_sessionPanel->setObjectName(QStringLiteral("studioDock"));
@@ -961,24 +1073,26 @@ QWidget *MainWindow::createPlayerPage() {
     m_sourceCount = mutedLabel(QStringLiteral("1 source"), m_sessionPanel);
     dockHeader->addWidget(m_sourceCount);
     dock->addLayout(dockHeader);
-    auto addSection = [this, dock](const QString &text) {
-        auto *label = new QLabel(text, m_sessionPanel);
-        label->setObjectName(QStringLiteral("dockTitle"));
-        dock->addWidget(label);
-    };
-    addSection(QStringLiteral("SOURCES"));
-    m_sourceList = new QListWidget(m_sessionPanel);
+    auto *sourceAreaSplitter = new QSplitter(Qt::Vertical, m_sessionPanel);
+    sourceAreaSplitter->setObjectName(QStringLiteral("sourceAreaSplitter"));
+    sourceAreaSplitter->setAccessibleName(QStringLiteral("sourcesVerticalSplitter"));
+    sourceAreaSplitter->setHandleWidth(7);
+    sourceAreaSplitter->setChildrenCollapsible(false);
+    m_sourceList = new QListWidget(sourceAreaSplitter);
     m_sourceList->setObjectName(QStringLiteral("sourceList"));
-    m_sourceList->setMinimumHeight(90);
-    m_sourceList->setMaximumHeight(128);
-    dock->addWidget(m_sourceList);
+    m_sourceList->setMinimumHeight(72);
+    sourceAreaSplitter->addWidget(m_sourceList);
+    auto *belowSources = new QWidget(sourceAreaSplitter);
+    auto *belowSourcesLayout = new QVBoxLayout(belowSources);
+    belowSourcesLayout->setContentsMargins(0, 0, 0, 0);
+    belowSourcesLayout->setSpacing(8);
     auto *sourceRow = new QGridLayout;
     sourceRow->setSpacing(6);
     const QList<QPair<QString, int>> additions{{QStringLiteral("Camera"), 1}, {QStringLiteral("Image"), 2},
                                                {QStringLiteral("Text"), 3}, {QStringLiteral("Color"), 4}};
     int sourceIndex = 0;
     for (const auto &entry : additions) {
-        auto *button = new QPushButton(QStringLiteral("+") + entry.first, m_sessionPanel);
+        auto *button = new QPushButton(QStringLiteral("+") + entry.first, belowSources);
         button->setObjectName(QStringLiteral("sourceButton"));
         const QString icon = entry.second == 1 ? QStringLiteral("camera")
             : entry.second == 2 ? QStringLiteral("image")
@@ -989,19 +1103,44 @@ QWidget *MainWindow::createPlayerPage() {
         sourceRow->addWidget(button, sourceIndex / 2, sourceIndex % 2);
         ++sourceIndex;
     }
-    dock->addLayout(sourceRow);
+    belowSourcesLayout->addLayout(sourceRow);
+    auto *layersTitle = new QLabel(QStringLiteral("LAYERS"), belowSources);
+    layersTitle->setObjectName(QStringLiteral("dockTitle"));
+    belowSourcesLayout->addWidget(layersTitle);
 
-    addSection(QStringLiteral("LAYERS"));
-    m_layerList = new QListWidget(m_sessionPanel);
+    auto *layerAreaSplitter = new QSplitter(Qt::Vertical, belowSources);
+    layerAreaSplitter->setObjectName(QStringLiteral("layerAreaSplitter"));
+    layerAreaSplitter->setAccessibleName(QStringLiteral("layersVerticalSplitter"));
+    layerAreaSplitter->setHandleWidth(7);
+    layerAreaSplitter->setChildrenCollapsible(false);
+    m_layerList = new QListWidget(layerAreaSplitter);
     m_layerList->setObjectName(QStringLiteral("layerList"));
+    m_layerList->setMinimumHeight(72);
     m_layerList->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_layerList->setDragDropMode(QAbstractItemView::InternalMove);
-    dock->addWidget(m_layerList, 1);
+    layerAreaSplitter->addWidget(m_layerList);
+    auto *lowerScroll = new InspectorScrollArea(layerAreaSplitter);
+    lowerScroll->setObjectName(QStringLiteral("layerInspectorScroll"));
+    lowerScroll->setFrameShape(QFrame::NoFrame);
+    lowerScroll->setWidgetResizable(true);
+    lowerScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    lowerScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    lowerScroll->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+    lowerScroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    lowerScroll->setMinimumSize(0, 0);
+    lowerScroll->setMinimumHeight(0);
+    auto *lowerPanel = new QWidget;
+    lowerPanel->setObjectName(QStringLiteral("layerInspectorContent"));
+    lowerPanel->setMinimumSize(0, 0);
+    lowerScroll->setWidget(lowerPanel);
+    auto *lowerLayout = new QVBoxLayout(lowerPanel);
+    lowerLayout->setContentsMargins(0, 0, 0, 0);
+    lowerLayout->setSpacing(8);
     auto *layerRow = new QHBoxLayout;
-    auto *up = new QPushButton(QStringLiteral("Up"), m_sessionPanel);
-    auto *down = new QPushButton(QStringLiteral("Down"), m_sessionPanel);
-    auto *lock = new QPushButton(QStringLiteral("Lock"), m_sessionPanel);
-    auto *remove = new QPushButton(QStringLiteral("Remove"), m_sessionPanel);
+    auto *up = new QPushButton(QStringLiteral("Up"), lowerPanel);
+    auto *down = new QPushButton(QStringLiteral("Down"), lowerPanel);
+    auto *lock = new QPushButton(QStringLiteral("Lock"), lowerPanel);
+    auto *remove = new QPushButton(QStringLiteral("Remove"), lowerPanel);
     up->setIcon(StudioVisuals::icon(QStringLiteral("up")));
     down->setIcon(StudioVisuals::icon(QStringLiteral("down")));
     lock->setIcon(StudioVisuals::icon(QStringLiteral("lock")));
@@ -1018,8 +1157,8 @@ QWidget *MainWindow::createPlayerPage() {
     remove->setToolTip(QStringLiteral("Remove layer"));
     remove->setAccessibleName(QStringLiteral("deleteLayerButton"));
     layerRow->addStretch();
-    dock->addLayout(layerRow);
-    m_transformPanel = new QWidget(m_sessionPanel);
+    lowerLayout->addLayout(layerRow);
+    m_transformPanel = new QWidget(lowerPanel);
     m_transformPanel->setObjectName(QStringLiteral("transformPanel"));
     auto *transformLayout = new QVBoxLayout(m_transformPanel);
     transformLayout->setContentsMargins(0, 2, 0, 0);
@@ -1069,7 +1208,7 @@ QWidget *MainWindow::createPlayerPage() {
     appearanceRow->addWidget(m_layerMask);
     transformLayout->addLayout(appearanceRow);
     m_transformPanel->setVisible(false);
-    dock->addWidget(m_transformPanel);
+    lowerLayout->addWidget(m_transformPanel);
 
     auto applyGeometry = [this](double) {
         if (m_updatingInspector || !m_sceneCanvas || !m_layerX || !m_layerY ||
@@ -1083,48 +1222,85 @@ QWidget *MainWindow::createPlayerPage() {
                                   m_layerHeight, m_layerRotation})
         connect(field, &QDoubleSpinBox::valueChanged, this, applyGeometry);
 
-    addSection(QStringLiteral("RECORDING CONFIDENCE"));
-    m_recordCamera = new QCheckBox(QStringLiteral("Camera"), m_sessionPanel);
+    auto *confidenceTitle = new QLabel(QStringLiteral("RECORDING CONFIDENCE"), lowerPanel);
+    confidenceTitle->setObjectName(QStringLiteral("dockTitle"));
+    lowerLayout->addWidget(confidenceTitle);
+    m_recordCamera = new QCheckBox(QStringLiteral("Camera"), lowerPanel);
     m_recordCamera->setToolTip(QStringLiteral("Include the presenter camera as an independent track"));
     m_recordCamera->setObjectName(QStringLiteral("dockToggle"));
-    m_recordMicrophone = new QCheckBox(QStringLiteral("Microphone"), m_sessionPanel);
+    m_recordMicrophone = new QCheckBox(QStringLiteral("Microphone"), lowerPanel);
     m_recordMicrophone->setToolTip(QStringLiteral("Include the microphone as an independent track"));
     m_recordMicrophone->setObjectName(QStringLiteral("dockToggle"));
     connect(m_recordCamera, &QCheckBox::toggled, this, [this](bool enabled) {
         setCameraPreviewEnabled(enabled);
     });
-    m_recordingStatus = mutedLabel(QStringLiteral("Ready to record"), m_sessionPanel);
-    dock->addWidget(m_recordingStatus);
+    m_recordingStatus = mutedLabel(QStringLiteral("Ready to record"), lowerPanel);
+    lowerLayout->addWidget(m_recordingStatus);
     auto *recordRow = new QHBoxLayout;
-    m_recordButton = new QPushButton(QStringLiteral("Start recording"), m_sessionPanel);
+    m_recordButton = new QPushButton(QStringLiteral("Start recording"), lowerPanel);
     m_recordButton->setObjectName(QStringLiteral("recordButton"));
     connect(m_recordButton, &QPushButton::clicked, this, &MainWindow::toggleRecording);
-    auto *exportButton = new QPushButton(QStringLiteral("Export MP4"), m_sessionPanel);
+    auto *exportButton = new QPushButton(QStringLiteral("Export MP4"), lowerPanel);
     exportButton->setObjectName(QStringLiteral("secondaryButton"));
     exportButton->setIcon(StudioVisuals::icon(QStringLiteral("export")));
     exportButton->setAccessibleName(QStringLiteral("exportButton"));
     connect(exportButton, &QPushButton::clicked, this, &MainWindow::exportCurrentProject);
     recordRow->addWidget(exportButton, 1);
-    dock->addLayout(recordRow);
+    lowerLayout->addLayout(recordRow);
 
-    m_sessionState = new QLabel(QStringLiteral("Receiver stopped"), m_sessionPanel);
+    m_sessionState = new QLabel(QStringLiteral("Receiver stopped"), lowerPanel);
     m_sessionState->setObjectName(QStringLiteral("sessionMini"));
-    m_deviceName = new QLabel(QStringLiteral("—"), m_sessionPanel);
-    m_deviceModel = mutedLabel(QStringLiteral("Waiting for a connection"), m_sessionPanel);
-    m_resolution = new QLabel(QStringLiteral("—"), m_sessionPanel);
-    m_duration = new QLabel(QStringLiteral("00:00"), m_sessionPanel);
+    m_deviceName = new QLabel(QStringLiteral("—"), lowerPanel);
+    m_deviceModel = mutedLabel(QStringLiteral("Waiting for a connection"), lowerPanel);
+    m_resolution = new QLabel(QStringLiteral("—"), lowerPanel);
+    m_duration = new QLabel(QStringLiteral("00:00"), lowerPanel);
     m_duration->setObjectName(QStringLiteral("recordTime"));
-    m_networkAddress = new QLabel(NetworkDiagnostics::primaryAddress(), m_sessionPanel);
-    m_securitySummary = mutedLabel({}, m_sessionPanel);
+    m_networkAddress = new QLabel(NetworkDiagnostics::primaryAddress(), lowerPanel);
+    m_securitySummary = mutedLabel({}, lowerPanel);
     auto *streamRow = new QHBoxLayout;
     streamRow->addWidget(m_sessionState, 1);
     streamRow->addWidget(m_duration);
-    dock->addLayout(streamRow);
-    dock->addWidget(m_deviceName);
-    dock->addWidget(m_resolution);
-    dock->addWidget(m_networkAddress);
-    dock->addWidget(m_deviceModel);
-    dock->addWidget(m_securitySummary);
+    lowerLayout->addLayout(streamRow);
+    lowerLayout->addWidget(m_deviceName);
+    lowerLayout->addWidget(m_resolution);
+    lowerLayout->addWidget(m_networkAddress);
+    lowerLayout->addWidget(m_deviceModel);
+    lowerLayout->addWidget(m_securitySummary);
+    layerAreaSplitter->addWidget(lowerScroll);
+    layerAreaSplitter->setStretchFactor(0, 1);
+    layerAreaSplitter->setStretchFactor(1, 0);
+    layerAreaSplitter->setSizes({180, 420});
+    belowSourcesLayout->addWidget(layerAreaSplitter, 1);
+    sourceAreaSplitter->addWidget(belowSources);
+    sourceAreaSplitter->setStretchFactor(0, 0);
+    sourceAreaSplitter->setStretchFactor(1, 1);
+    sourceAreaSplitter->setSizes({128, 620});
+    dock->addWidget(sourceAreaSplitter, 1);
+
+    // The parent layouts are not sized until the first event-loop turn.  Set
+    // both initial splits after the complete dock is attached so a fresh
+    // workspace starts balanced instead of collapsing either list to its
+    // minimum while still leaving the inspector scrollable.
+    const auto applyInitialDockSplits = [sourceAreaSplitter, layerAreaSplitter]() {
+        const int total = sourceAreaSplitter->height();
+        if (total <= 0) return;
+        const QList<int> sourceSizes = sourceAreaSplitter->sizes();
+        if (sourceSizes.size() == 2 && sourceSizes.at(0) > 260) {
+            const int sourceHeight = qBound(112, total / 4, 240);
+            sourceAreaSplitter->setSizes({sourceHeight, qMax(1, total - sourceHeight)});
+        }
+        const int nestedTotal = layerAreaSplitter->height();
+        if (nestedTotal <= 0) return;
+        const QList<int> layerSizes = layerAreaSplitter->sizes();
+        if (layerSizes.size() == 2 && layerSizes.at(0) < 120) {
+            const int listHeight = qBound(120, nestedTotal / 3, 260);
+            layerAreaSplitter->setSizes({listHeight, qMax(1, nestedTotal - listHeight)});
+        }
+    };
+    QTimer::singleShot(0, sourceAreaSplitter, applyInitialDockSplits);
+    // A second pass is needed for the standalone launch path: the first pass
+    // can run before the top-level window performs its final layout pass.
+    QTimer::singleShot(100, sourceAreaSplitter, applyInitialDockSplits);
     controls->insertWidget(5, m_recordCamera);
     controls->insertWidget(6, m_recordMicrophone);
     controls->insertWidget(7, m_duration);
@@ -1680,6 +1856,7 @@ void MainWindow::handleStateChanged(ReceiverState state) {
                                            QStringLiteral("Open Diagnostics or restart the receiver."));
         break;
     }
+    refreshLayerList();
 }
 
 void MainWindow::handleReceiverEvent(const ReceiverEvent &event) {
@@ -1941,7 +2118,7 @@ void MainWindow::enterFullscreen() {
     m_sessionPanel->hide();
     m_playerChrome->hide();
     m_playerControls->hide();
-    if (m_stageHint) m_stageHint->hide();
+    if (m_stageFooter) m_stageFooter->hide();
     if (m_stageLayout) {
         m_stageLayout->setContentsMargins(0, 0, 0, 0);
         m_stageLayout->setSpacing(0);
@@ -1986,7 +2163,7 @@ void MainWindow::exitFullscreen() {
     m_sessionPanel->show();
     m_playerChrome->show();
     m_playerControls->show();
-    if (m_stageHint) m_stageHint->show();
+    if (m_stageFooter) m_stageFooter->show();
     if (m_stageLayout) {
         m_stageLayout->setContentsMargins(20, 18, 20, 12);
         m_stageLayout->setSpacing(8);

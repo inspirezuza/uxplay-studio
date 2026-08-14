@@ -72,6 +72,7 @@ private:
     void addStudioSource(int type);
     void refreshLayerList();
     void refreshLayerInspector();
+    void updateCanvasHint();
     void refreshProjectList();
     bool openProjectDirectory(const QString &directory);
     void toggleRecording();
@@ -137,6 +138,7 @@ private:
     QWidget *m_playerChrome = nullptr;
     QWidget *m_playerControls = nullptr;
     QWidget *m_stageFrame = nullptr;
+    QWidget *m_stageFooter = nullptr;
     QLabel *m_stageHint = nullptr;
     QVBoxLayout *m_stageLayout = nullptr;
     QHBoxLayout *m_playerPageLayout = nullptr;
@@ -152,6 +154,11 @@ private:
     QLabel *m_networkAddress = nullptr;
     QLabel *m_securitySummary = nullptr;
     QPushButton *m_fullscreenButton = nullptr;
+    QWidget *m_canvasViewControls = nullptr;
+    QPushButton *m_zoomOutButton = nullptr;
+    QPushButton *m_zoomInButton = nullptr;
+    QPushButton *m_fitCanvasButton = nullptr;
+    QLabel *m_zoomLabel = nullptr;
 
     QTextEdit *m_activityLog = nullptr;
     QPlainTextEdit *m_diagnostics = nullptr;

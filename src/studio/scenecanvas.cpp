@@ -9,6 +9,7 @@
 #include <QImage>
 #include <QResizeEvent>
 #include <QUndoCommand>
+#include <QWheelEvent>
 #include <QtMath>
 #include <algorithm>
 #include <functional>
@@ -228,6 +229,46 @@ QSize SceneCanvas::canvasSize() const {
     return m_document ? m_document->composition(m_format).canvasSize : QSize();
 }
 
+void SceneCanvas::fitCanvas() {
+    if (!m_scene || m_scene->sceneRect().isEmpty()) return;
+    resetTransform();
+    fitInView(m_scene->sceneRect(), Qt::KeepAspectRatio);
+    m_viewScale = 1.0;
+    m_autoFit = true;
+    emitZoomChanged();
+}
+
+void SceneCanvas::zoomIn() {
+    zoomBy(1.15);
+}
+
+void SceneCanvas::zoomOut() {
+    zoomBy(1.0 / 1.15);
+}
+
+int SceneCanvas::zoomPercent() const {
+    return qRound(m_viewScale * 100.0);
+}
+
+void SceneCanvas::zoomBy(qreal factor, const QPoint *viewAnchor) {
+    if (!m_scene || m_scene->sceneRect().isEmpty() || factor <= 0.0) return;
+    const qreal nextScale = qBound<qreal>(0.2, m_viewScale * factor, 4.0);
+    if (qFuzzyCompare(nextScale, m_viewScale)) return;
+    const qreal ratio = nextScale / m_viewScale;
+    const auto previousAnchor = transformationAnchor();
+    setTransformationAnchor(viewAnchor ? QGraphicsView::AnchorUnderMouse
+                                        : QGraphicsView::AnchorViewCenter);
+    m_autoFit = false;
+    scale(ratio, ratio);
+    setTransformationAnchor(previousAnchor);
+    m_viewScale = nextScale;
+    emitZoomChanged();
+}
+
+void SceneCanvas::emitZoomChanged() {
+    emit zoomChanged(zoomPercent());
+}
+
 bool SceneCanvas::selectLayer(const QString &layerId, bool add) {
     LayerItem *item = m_items.value(layerId);
     if (!item) return false;
@@ -385,7 +426,7 @@ void SceneCanvas::rebuild() {
         m_items.insert(layer.id, item);
         if (selected.contains(layer.id)) item->setSelected(true);
     }
-    fitInView(m_scene->sceneRect(), Qt::KeepAspectRatio);
+    fitCanvas();
     emitSelection();
 }
 
@@ -417,14 +458,40 @@ void SceneCanvas::applyTransforms(const QHash<QString, SceneTransform> &transfor
 
 void SceneCanvas::resizeEvent(QResizeEvent *event) {
     QGraphicsView::resizeEvent(event);
-    if (m_document && m_interaction == Interaction::None) {
-        fitInView(m_scene->sceneRect(), Qt::KeepAspectRatio);
+    if (m_document && m_interaction == Interaction::None && m_autoFit) {
+        fitCanvas();
     }
+}
+
+void SceneCanvas::wheelEvent(QWheelEvent *event) {
+    if (event->modifiers().testFlag(Qt::ControlModifier) && event->angleDelta().y() != 0) {
+        const QPoint anchor = event->position().toPoint();
+        zoomBy(event->angleDelta().y() > 0 ? 1.15 : 1.0 / 1.15, &anchor);
+        event->accept();
+        return;
+    }
+    QGraphicsView::wheelEvent(event);
 }
 
 void SceneCanvas::keyPressEvent(QKeyEvent *event) {
     if (event->matches(QKeySequence::Undo)) { m_undoStack.undo(); event->accept(); return; }
     if (event->matches(QKeySequence::Redo)) { m_undoStack.redo(); event->accept(); return; }
+    if (event->modifiers().testFlag(Qt::ControlModifier) &&
+        (event->key() == Qt::Key_Plus || event->key() == Qt::Key_Equal)) {
+        zoomIn();
+        event->accept();
+        return;
+    }
+    if (event->modifiers().testFlag(Qt::ControlModifier) && event->key() == Qt::Key_Minus) {
+        zoomOut();
+        event->accept();
+        return;
+    }
+    if (event->modifiers().testFlag(Qt::ControlModifier) && event->key() == Qt::Key_0) {
+        fitCanvas();
+        event->accept();
+        return;
+    }
     QPointF delta;
     const qreal step = event->modifiers().testFlag(Qt::ShiftModifier) ? 24.0 : 8.0;
     if (event->key() == Qt::Key_Left) delta.setX(-step);
@@ -565,6 +632,34 @@ void SceneCanvas::mouseReleaseEvent(QMouseEvent *event) {
     unsetCursor();
     pushTransforms(label, before, after);
     event->accept();
+}
+
+void SceneCanvas::drawForeground(QPainter *painter, const QRectF &rect) {
+    Q_UNUSED(rect)
+    if (!m_scene || m_scene->sceneRect().isEmpty()) return;
+    painter->save();
+    QPen border(QColor(QStringLiteral("#79A7FF")), 1.0);
+    border.setCosmetic(true);
+    painter->setPen(border);
+    painter->setBrush(Qt::NoBrush);
+    const QRectF bounds = m_scene->sceneRect();
+    painter->drawRect(bounds);
+
+    // Corner ticks make the true composition boundary visible even when a
+    // full-size layer covers the canvas with the same dark tone as the view.
+    const qreal tick = qMin<qreal>(36.0, qMin(bounds.width(), bounds.height()) * 0.04);
+    const QList<QLineF> ticks {
+        {bounds.topLeft(), bounds.topLeft() + QPointF(tick, 0)},
+        {bounds.topLeft(), bounds.topLeft() + QPointF(0, tick)},
+        {bounds.topRight(), bounds.topRight() + QPointF(-tick, 0)},
+        {bounds.topRight(), bounds.topRight() + QPointF(0, tick)},
+        {bounds.bottomLeft(), bounds.bottomLeft() + QPointF(tick, 0)},
+        {bounds.bottomLeft(), bounds.bottomLeft() + QPointF(0, -tick)},
+        {bounds.bottomRight(), bounds.bottomRight() + QPointF(-tick, 0)},
+        {bounds.bottomRight(), bounds.bottomRight() + QPointF(0, -tick)}
+    };
+    painter->drawLines(ticks);
+    painter->restore();
 }
 
 void SceneCanvas::emitSelection() {

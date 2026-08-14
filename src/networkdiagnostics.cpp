@@ -9,6 +9,7 @@
 #include <QSysInfo>
 #include <QTextStream>
 #include <QtGlobal>
+#include <limits>
 #include <gst/gst.h>
 
 #ifdef Q_OS_WIN
@@ -16,7 +17,42 @@
 #include <winsvc.h>
 #endif
 
+namespace {
+bool isPrivateIpv4(const QString &address) {
+    const QStringList octets = address.split(QLatin1Char('.'));
+    if (octets.size() != 4) return false;
+    bool ok = false;
+    const int first = octets.at(0).toInt(&ok);
+    if (!ok) return false;
+    if (first == 10 || first == 192) return true;
+    if (first != 172) return false;
+    const int second = octets.at(1).toInt(&ok);
+    return ok && second >= 16 && second <= 31;
+}
+
+int addressPreference(const QNetworkInterface &networkInterface, const QString &address) {
+    const QString name = networkInterface.humanReadableName().toLower();
+    int score = networkInterface.flags().testFlag(QNetworkInterface::IsRunning) ? 10 : 0;
+    if (name.contains(QStringLiteral("wi-fi")) || name.contains(QStringLiteral("wifi")) ||
+        name.contains(QStringLiteral("wlan"))) {
+        score += 100;
+    } else if (name.contains(QStringLiteral("ethernet"))) {
+        score += 50;
+    }
+    if (isPrivateIpv4(address)) score += 30;
+    if (address.startsWith(QStringLiteral("169.254."))) score -= 200;
+    if (name.contains(QStringLiteral("virtual")) || name.contains(QStringLiteral("vethernet")) ||
+        name.contains(QStringLiteral("bluetooth")) || name.contains(QStringLiteral("vpn")) ||
+        name.contains(QStringLiteral("loopback"))) {
+        score -= 120;
+    }
+    return score;
+}
+}
+
 QString NetworkDiagnostics::primaryAddress() {
+    QString preferred;
+    int preferredScore = std::numeric_limits<int>::min();
     for (const QNetworkInterface &networkInterface : QNetworkInterface::allInterfaces()) {
         const auto flags = networkInterface.flags();
         if (!flags.testFlag(QNetworkInterface::IsUp) ||
@@ -24,12 +60,18 @@ QString NetworkDiagnostics::primaryAddress() {
             continue;
         }
         for (const QNetworkAddressEntry &entry : networkInterface.addressEntries()) {
-            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol && !entry.ip().isLoopback()) {
-                return entry.ip().toString();
+            if (entry.ip().protocol() != QAbstractSocket::IPv4Protocol || entry.ip().isLoopback()) {
+                continue;
+            }
+            const QString address = entry.ip().toString();
+            const int score = addressPreference(networkInterface, address);
+            if (score > preferredScore) {
+                preferred = address;
+                preferredScore = score;
             }
         }
     }
-    return QStringLiteral("No active IPv4 address");
+    return preferred.isEmpty() ? QStringLiteral("No active IPv4 address") : preferred;
 }
 
 bool NetworkDiagnostics::bonjourServiceAvailable() {
