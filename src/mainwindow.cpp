@@ -25,6 +25,7 @@
 #include <QColorDialog>
 #include <QComboBox>
 #include <QContextMenuEvent>
+#include <QButtonGroup>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -218,6 +219,7 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart, const QString &projectRo
     setupUi();
     setupTray();
     loadConfigIntoControls();
+    ensureStudioWorkspace();
 
     connect(m_recordingSession, &RecordingSession::stateChanged, this,
             [this](RecordingState state) {
@@ -229,8 +231,7 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart, const QString &projectRo
         const bool active = state == RecordingState::Recording ||
                             state == RecordingState::Finalizing ||
                             state == RecordingState::Starting;
-        m_recordButton->setText(active ? QStringLiteral("Stop safely")
-                                       : QStringLiteral("Start recording"));
+        m_recordButton->setText(active ? QStringLiteral("Stop") : QStringLiteral("Record"));
         m_recordButton->setProperty("recording", active);
         refreshStyle(m_recordButton);
         m_recordingStatus->setText(m_recordingSession->statusSummary());
@@ -450,37 +451,26 @@ void MainWindow::selectPage(int page) {
     }
 }
 
-void MainWindow::setStudioMode(bool edit) {
+void MainWindow::ensureStudioWorkspace() {
     if (!m_previewStack) return;
-    if (edit && m_recordingSession &&
-        (m_recordingSession->state() == RecordingState::Starting ||
-         m_recordingSession->state() == RecordingState::Recording ||
-         m_recordingSession->state() == RecordingState::Finalizing)) {
-        edit = false;
-    }
-    m_previewStack->setCurrentIndex(edit ? 1 : 0);
-    // The camera self-view is a live-mode monitor. In Edit layout the camera
-    // is already rendered by its scene layer, so leaving this native overlay
-    // visible would show the same feed twice.
-    if (m_cameraSelfView) {
-        m_cameraSelfView->setOverlayVisible(!edit);
-        if (!edit) m_cameraSelfView->setActive(m_cameraSelfView->isActive());
-    }
-    m_liveModeButton->setChecked(!edit);
-    m_editModeButton->setChecked(edit);
+    // OBS-style workspace: the composed scene is always the primary preview.
+    // The native video surface remains mounted as the receiver target, but it
+    // is never a second user-facing monitor.
+    m_previewStack->setCurrentWidget(m_sceneCanvas);
+    if (m_cameraSelfView) m_cameraSelfView->setOverlayVisible(false);
+    if (m_editModeButton) m_editModeButton->setChecked(true);
     for (QPushButton *button : std::as_const(m_editActionButtons))
-        button->setVisible(edit);
-    if (m_canvasViewControls) m_canvasViewControls->setVisible(edit);
-    if (m_recordCamera) m_recordCamera->setVisible(!edit);
-    if (m_recordMicrophone) m_recordMicrophone->setVisible(!edit);
-    if (m_duration) m_duration->setVisible(!edit);
-    if (m_recordButton) m_recordButton->setVisible(!edit);
-    if (m_transformPanel) m_transformPanel->setVisible(edit);
+        button->setVisible(true);
+    if (m_canvasViewControls) m_canvasViewControls->setVisible(true);
+    if (m_recordCamera) m_recordCamera->setVisible(true);
+    if (m_recordMicrophone) m_recordMicrophone->setVisible(true);
+    if (m_duration) m_duration->setVisible(true);
+    if (m_recordButton) m_recordButton->setVisible(true);
+    if (m_transformPanel) m_transformPanel->setVisible(true);
 }
 
 void MainWindow::deleteSelectedLayers() {
-    if (!m_sceneCanvas || !m_pages || m_pages->currentIndex() != 0 ||
-        !m_previewStack || m_previewStack->currentIndex() != 1) {
+    if (!m_sceneCanvas || !m_pages || m_pages->currentIndex() != 0) {
         return;
     }
     QWidget *focus = QApplication::focusWidget();
@@ -495,7 +485,7 @@ void MainWindow::deleteSelectedLayers() {
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
-    if (event->type() == QEvent::ContextMenu &&
+    if (!m_fullscreen && event->type() == QEvent::ContextMenu &&
         (watched == m_stageFrame || watched == m_previewStack || watched == m_playerCard)) {
         auto *context = static_cast<QContextMenuEvent *>(event);
         showCanvasContextMenu({}, context->globalPos());
@@ -525,6 +515,10 @@ void MainWindow::setRecordingUiLocked(bool locked) {
         button->setEnabled(!locked);
     for (QPushButton *button : findChildren<QPushButton *>(QStringLiteral("iconButton")))
         button->setEnabled(!locked);
+    for (QPushButton *button : std::as_const(m_editActionButtons))
+        button->setEnabled(!locked);
+    if (m_transformPanel) m_transformPanel->setEnabled(!locked);
+    if (m_sceneCanvas) m_sceneCanvas->setEditingEnabled(!locked);
 }
 
 void MainWindow::setSceneFormat(bool vertical) {
@@ -540,7 +534,7 @@ void MainWindow::setSceneFormat(bool vertical) {
     m_sceneCanvas->setFormat(static_cast<SceneFormat>(m_sceneFormat));
     refreshLayerList();
     updateCanvasHint();
-    setStudioMode(true);
+    ensureStudioWorkspace();
 }
 
 void MainWindow::addStudioSource(int type) {
@@ -585,7 +579,7 @@ void MainWindow::addStudioSource(int type) {
     m_sceneCanvas->setDocument(m_sceneDocument.get(), static_cast<SceneFormat>(m_sceneFormat));
     refreshLayerList();
     m_sceneCanvas->selectLayer(m_sceneFormat == static_cast<int>(SceneFormat::Wide) ? wide : vertical);
-    setStudioMode(true);
+    ensureStudioWorkspace();
     saveCurrentProject();
 }
 
@@ -899,6 +893,38 @@ void MainWindow::showSourceListContextMenu(const QPoint &position) {
     }
 }
 
+void MainWindow::showProjectListContextMenu(const QPoint &position) {
+    if (!m_projectList || !m_projectStore) return;
+    QListWidgetItem *item = m_projectList->itemAt(position);
+    const QPoint globalPosition = m_projectList->viewport()->mapToGlobal(position);
+    if (item) m_projectList->setCurrentItem(item);
+
+    QMenu menu(this);
+    menu.setObjectName(QStringLiteral("projectContextMenu"));
+    QAction *open = menu.addAction(QStringLiteral("Open in Studio"));
+    QAction *openFolder = menu.addAction(QStringLiteral("Open project folder"));
+    menu.addSeparator();
+    QAction *refresh = menu.addAction(QStringLiteral("Refresh projects"));
+    QAction *openRoot = menu.addAction(QStringLiteral("Open recordings folder"));
+    open->setEnabled(item != nullptr);
+    openFolder->setEnabled(item != nullptr);
+
+    QAction *chosen = menu.exec(globalPosition);
+    if (chosen == open && item) {
+        openProjectDirectory(item->data(Qt::UserRole).toString());
+    } else if (chosen == openFolder && item) {
+        const QString directory = item->data(Qt::UserRole).toString();
+        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(directory)) && m_projectFeedback)
+            m_projectFeedback->setText(QStringLiteral("Could not open this project folder"));
+    } else if (chosen == refresh) {
+        refreshProjectList();
+    } else if (chosen == openRoot) {
+        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(m_projectStore->rootDirectory())) &&
+            m_projectFeedback)
+            m_projectFeedback->setText(QStringLiteral("Could not open the recordings folder"));
+    }
+}
+
 void MainWindow::showCameraMonitorContextMenu(const QPoint &globalPosition) {
     if (!m_cameraSelfView) return;
     QMenu menu(this);
@@ -978,7 +1004,7 @@ bool MainWindow::openProjectDirectory(const QString &directory) {
     loadRecordedPreviews(*m_currentProject);
     if (m_projectFeedback) m_projectFeedback->clear();
     selectPage(0);
-    setStudioMode(true);
+    ensureStudioWorkspace();
     return true;
 }
 
@@ -998,7 +1024,6 @@ void MainWindow::toggleRecording() {
         m_recordingStatus->setText(QStringLiteral("Connect an iPad before recording"));
         return;
     }
-    setStudioMode(false);
     QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     m_sceneDocument->setTitle(QStringLiteral("Recording %1")
         .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH-mm"))));
@@ -1128,23 +1153,33 @@ QWidget *MainWindow::createPlayerPage() {
     auto *toolbar = new QHBoxLayout(m_playerChrome);
     toolbar->setContentsMargins(18, 9, 18, 9);
     toolbar->setSpacing(5);
-    m_liveModeButton = new QPushButton(QStringLiteral("Live"), m_playerChrome);
     m_editModeButton = new QPushButton(QStringLiteral("Edit layout"), m_playerChrome);
-    m_wideButton = new QPushButton(QStringLiteral("16:9 Wide"), m_playerChrome);
-    m_verticalButton = new QPushButton(QStringLiteral("9:16 Vertical"), m_playerChrome);
-    for (auto *button : {m_liveModeButton, m_editModeButton, m_wideButton, m_verticalButton}) {
+    m_wideButton = new QPushButton(QStringLiteral("16:9"), m_playerChrome);
+    m_verticalButton = new QPushButton(QStringLiteral("9:16"), m_playerChrome);
+    for (auto *button : {m_editModeButton, m_wideButton, m_verticalButton}) {
         button->setObjectName(QStringLiteral("segmentedButton"));
         button->setCheckable(true);
         toolbar->addWidget(button);
     }
-    m_liveModeButton->setChecked(true);
+    m_editModeButton->setProperty("role", QStringLiteral("workspaceTab"));
+    m_wideButton->setProperty("role", QStringLiteral("formatTab"));
+    m_verticalButton->setProperty("role", QStringLiteral("formatTab"));
+    m_editModeButton->setToolTip(QStringLiteral("OBS-style live workspace and layout editor"));
+    m_wideButton->setToolTip(QStringLiteral("Switch to the 16:9 wide composition"));
+    m_verticalButton->setToolTip(QStringLiteral("Switch to the 9:16 vertical composition"));
+    m_editModeButton->setChecked(true);
     m_wideButton->setChecked(true);
-    connect(m_liveModeButton, &QPushButton::clicked, this, [this]() { setStudioMode(false); });
-    connect(m_editModeButton, &QPushButton::clicked, this, [this]() { setStudioMode(true); });
+    auto *formatTabs = new QButtonGroup(m_playerChrome);
+    formatTabs->setObjectName(QStringLiteral("formatTabs"));
+    formatTabs->setExclusive(true);
+    formatTabs->addButton(m_wideButton, static_cast<int>(SceneFormat::Wide));
+    formatTabs->addButton(m_verticalButton, static_cast<int>(SceneFormat::Vertical));
+    connect(m_editModeButton, &QPushButton::clicked, this,
+            [this]() { ensureStudioWorkspace(); });
     connect(m_wideButton, &QPushButton::clicked, this, [this]() { setSceneFormat(false); });
     connect(m_verticalButton, &QPushButton::clicked, this, [this]() { setSceneFormat(true); });
     toolbar->addSpacing(8);
-    auto *formatLabel = new QLabel(QStringLiteral("OUTPUT"), m_playerChrome);
+    auto *formatLabel = new QLabel(QStringLiteral("CANVAS FORMAT"), m_playerChrome);
     formatLabel->setObjectName(QStringLiteral("pageEyebrow"));
     toolbar->addWidget(formatLabel);
     toolbar->addStretch();
@@ -1451,20 +1486,24 @@ QWidget *MainWindow::createPlayerPage() {
     auto *confidenceTitle = new QLabel(QStringLiteral("RECORDING CONFIDENCE"), lowerPanel);
     confidenceTitle->setObjectName(QStringLiteral("dockTitle"));
     lowerLayout->addWidget(confidenceTitle);
-    m_recordCamera = new QCheckBox(QStringLiteral("Camera"), lowerPanel);
+    m_recordCamera = new QCheckBox(QStringLiteral("Cam"), lowerPanel);
     m_recordCamera->setToolTip(QStringLiteral("Include the presenter camera as an independent track"));
     m_recordCamera->setObjectName(QStringLiteral("dockToggle"));
-    m_recordMicrophone = new QCheckBox(QStringLiteral("Microphone"), lowerPanel);
+    m_recordCamera->setFixedWidth(54);
+    m_recordMicrophone = new QCheckBox(QStringLiteral("Mic"), lowerPanel);
     m_recordMicrophone->setToolTip(QStringLiteral("Include the microphone as an independent track"));
     m_recordMicrophone->setObjectName(QStringLiteral("dockToggle"));
+    m_recordMicrophone->setFixedWidth(54);
     connect(m_recordCamera, &QCheckBox::toggled, this, [this](bool enabled) {
         setCameraPreviewEnabled(enabled);
     });
     m_recordingStatus = mutedLabel(QStringLiteral("Ready to record"), lowerPanel);
     lowerLayout->addWidget(m_recordingStatus);
     auto *recordRow = new QHBoxLayout;
-    m_recordButton = new QPushButton(QStringLiteral("Start recording"), lowerPanel);
+    m_recordButton = new QPushButton(QStringLiteral("Record"), lowerPanel);
     m_recordButton->setObjectName(QStringLiteral("recordButton"));
+    m_recordButton->setFixedWidth(86);
+    m_recordButton->setToolTip(QStringLiteral("Start a recoverable recording session"));
     connect(m_recordButton, &QPushButton::clicked, this, &MainWindow::toggleRecording);
     auto *exportButton = new QPushButton(QStringLiteral("Export MP4"), lowerPanel);
     exportButton->setObjectName(QStringLiteral("secondaryButton"));
@@ -1481,6 +1520,8 @@ QWidget *MainWindow::createPlayerPage() {
     m_resolution = new QLabel(QStringLiteral("—"), lowerPanel);
     m_duration = new QLabel(QStringLiteral("00:00"), lowerPanel);
     m_duration->setObjectName(QStringLiteral("recordTime"));
+    m_duration->setMinimumWidth(42);
+    m_duration->setAlignment(Qt::AlignCenter);
     m_networkAddress = new QLabel(NetworkDiagnostics::primaryAddress(), lowerPanel);
     m_securitySummary = mutedLabel({}, lowerPanel);
     auto *streamRow = new QHBoxLayout;
@@ -1684,6 +1725,7 @@ QWidget *MainWindow::createProjectsPage() {
     projectLayout->addLayout(row);
     m_projectList = new QListWidget(projectCard);
     m_projectList->setObjectName(QStringLiteral("projectList"));
+    m_projectList->setContextMenuPolicy(Qt::CustomContextMenu);
     m_projectList->setViewMode(QListView::IconMode);
     m_projectList->setResizeMode(QListView::Adjust);
     m_projectList->setMovement(QListView::Static);
@@ -1693,6 +1735,8 @@ QWidget *MainWindow::createProjectsPage() {
     m_projectList->setIconSize(QSize(260, 146));
     m_projectList->setGridSize(QSize(286, 224));
     projectLayout->addWidget(m_projectList, 1);
+    connect(m_projectList, &QListWidget::customContextMenuRequested, this,
+            &MainWindow::showProjectListContextMenu);
     m_projectFeedback = mutedLabel(QString(), projectCard);
     m_projectFeedback->setObjectName(QStringLiteral("projectFeedback"));
     m_projectFeedback->setAccessibleName(QStringLiteral("projectFeedback"));
@@ -2054,6 +2098,13 @@ void MainWindow::handleStateChanged(ReceiverState state) {
                                               : QStringLiteral("Start receiver"));
     }
 
+    if (state != ReceiverState::Mirroring && m_sceneDocument && m_sceneCanvas) {
+        for (const SceneSource &source : m_sceneDocument->sources()) {
+            if (source.type == SceneSourceType::AirPlay)
+                m_sceneCanvas->setSourcePreview(source.id, {});
+        }
+    }
+
     m_sessionState->setText(receiverStateLabel(state));
     if (state != ReceiverState::Mirroring) {
         m_videoSurface->setStreaming(false);
@@ -2339,7 +2390,7 @@ void MainWindow::setAutostart(bool enabled) {
 void MainWindow::enterFullscreen() {
     if (m_fullscreen) return;
     selectPage(0);
-    setStudioMode(false);
+    ensureStudioWorkspace();
     m_geometryBeforeFullscreen = saveGeometry();
     m_windowStateBeforeFullscreen = windowState() & ~Qt::WindowFullScreen;
     m_fullscreen = true;
@@ -2360,9 +2411,12 @@ void MainWindow::enterFullscreen() {
     m_playerPage->setProperty("fullscreen", true);
     m_playerCard->setProperty("fullscreen", true);
     m_videoSurface->setProperty("fullscreen", true);
+    m_sceneCanvas->setProperty("fullscreen", true);
+    m_sceneCanvas->setPresentationMode(true);
     refreshStyle(m_playerPage);
     refreshStyle(m_playerCard);
     refreshStyle(m_videoSurface);
+    refreshStyle(m_sceneCanvas);
 
     QApplication::setOverrideCursor(Qt::BlankCursor);
     m_cursorOverride = true;
@@ -2380,6 +2434,8 @@ void MainWindow::exitFullscreen() {
     m_playerPage->setProperty("fullscreen", false);
     m_playerCard->setProperty("fullscreen", false);
     m_videoSurface->setProperty("fullscreen", false);
+    m_sceneCanvas->setProperty("fullscreen", false);
+    m_sceneCanvas->setPresentationMode(false);
     m_playerPageLayout->setContentsMargins(0, 0, 0, 0);
     m_playerPageLayout->setSpacing(0);
     m_playerLayout->setContentsMargins(0, 0, 0, 0);
@@ -2387,6 +2443,7 @@ void MainWindow::exitFullscreen() {
     refreshStyle(m_playerPage);
     refreshStyle(m_playerCard);
     refreshStyle(m_videoSurface);
+    refreshStyle(m_sceneCanvas);
 
     m_sidebar->show();
     m_header->show();

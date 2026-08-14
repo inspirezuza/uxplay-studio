@@ -17,6 +17,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -71,7 +72,7 @@ private slots:
 
     void cleanupTestCase() { uxplay_set_recording_test_mode(0); }
 
-    void fullscreenShowsOnlyTheVideoSurfaceAndRestoresChrome() {
+    void fullscreenShowsOnlyTheComposedSceneAndRestoresChrome() {
         MainWindow window(nullptr, false);
         window.show();
         QTRY_VERIFY(window.isVisible());
@@ -89,6 +90,7 @@ private slots:
         auto *rendererBadge = window.findChild<QLabel *>(QStringLiteral("miniBadge"));
         auto *diagnostics = window.findChild<QPlainTextEdit *>(QStringLiteral("diagnosticsText"));
         auto *selfView = window.findChild<CameraSelfView *>(QStringLiteral("cameraSelfView"));
+        auto *sceneCanvas = window.findChild<SceneCanvas *>(QStringLiteral("sceneCanvas"));
 
         QVERIFY(button);
         QVERIFY(sidebar);
@@ -103,9 +105,10 @@ private slots:
         QVERIFY(rendererBadge);
         QVERIFY(diagnostics);
         QVERIFY(selfView);
+        QVERIFY(sceneCanvas);
         selfView->setFrame(QImage(640, 360, QImage::Format_ARGB32));
         selfView->setActive(true);
-        QVERIFY(selfView->isVisible());
+        QVERIFY(!selfView->isVisible());
         QCOMPARE(rendererBadge->text(), QStringLiteral("D3D11 · EMBEDDED"));
         QVERIFY(diagnostics->toPlainText().contains(
             QStringLiteral("Decoder: Automatic; hardware preferred with software fallback")));
@@ -118,9 +121,10 @@ private slots:
         QVERIFY(!header->isVisible());
         QVERIFY(!chrome->isVisible());
         QVERIFY(!controls->isVisible());
-        QVERIFY(selfView->isVisible());
+        QVERIFY(!selfView->isVisible());
         QVERIFY(selfView->isActive());
         QVERIFY(!selfView->isWindow());
+        QVERIFY(sceneCanvas->presentationMode());
         QVERIFY(card->property("fullscreen").toBool());
         QCOMPARE(pageLayout->contentsMargins(), QMargins());
         QCOMPARE(playerLayout->contentsMargins(), QMargins());
@@ -134,7 +138,8 @@ private slots:
         QVERIFY(header->isVisible());
         QVERIFY(chrome->isVisible());
         QVERIFY(controls->isVisible());
-        QVERIFY(selfView->isVisible());
+        QVERIFY(!selfView->isVisible());
+        QVERIFY(!sceneCanvas->presentationMode());
         QVERIFY(!card->property("fullscreen").toBool());
         QCOMPARE(pageLayout->contentsMargins(), QMargins());
         QCOMPARE(playerLayout->contentsMargins(), QMargins());
@@ -181,11 +186,7 @@ private slots:
         QVERIFY(!selfView->isVisible());
         selfView->setFrame(QImage(320, 180, QImage::Format_ARGB32));
         selfView->setActive(true);
-        auto *live = window.findChild<QPushButton *>(QStringLiteral("segmentedButton"));
-        QVERIFY(live);
-        QTest::mouseClick(live, Qt::LeftButton);
-        QCoreApplication::processEvents();
-        QVERIFY(selfView->isVisible());
+        QVERIFY(!selfView->isVisible());
         QTest::mouseClick(edit, Qt::LeftButton);
         QCoreApplication::processEvents();
         QVERIFY(controls->minimumSizeHint().width() <= controls->width());
@@ -271,20 +272,60 @@ private slots:
         QCOMPARE(zoomLabel->text(), QStringLiteral("100%"));
     }
 
-    void cameraMonitorStaysHiddenInEditModeWhenFramesArrive() {
+    void workspaceUsesOneComposedCanvasAndExclusiveFormatTabs() {
+        MainWindow window(nullptr, false);
+        window.resize(1440, 880);
+        window.show();
+        QTRY_VERIFY(window.isVisible());
+
+        auto *canvas = window.findChild<SceneCanvas *>(QStringLiteral("sceneCanvas"));
+        auto *stack = window.findChild<QStackedWidget *>(QStringLiteral("previewStack"));
+        QVERIFY(canvas);
+        QVERIFY(stack);
+        QCOMPARE(stack->currentWidget(), static_cast<QWidget *>(canvas));
+
+        QPushButton *edit = nullptr;
+        QPushButton *wide = nullptr;
+        QPushButton *vertical = nullptr;
+        for (QPushButton *button : window.findChildren<QPushButton *>()) {
+            if (button->text() == QStringLiteral("Edit layout")) edit = button;
+            if (button->text() == QStringLiteral("16:9")) wide = button;
+            if (button->text() == QStringLiteral("9:16")) vertical = button;
+            QVERIFY(button->text() != QStringLiteral("Live"));
+        }
+        QVERIFY(edit);
+        QVERIFY(wide);
+        QVERIFY(vertical);
+        QVERIFY(edit->isChecked());
+        QVERIFY(wide->isChecked());
+        QVERIFY(!vertical->isChecked());
+        QCOMPARE(canvas->format(), SceneFormat::Wide);
+
+        QTest::mouseClick(vertical, Qt::LeftButton);
+        QCoreApplication::processEvents();
+        QCOMPARE(canvas->format(), SceneFormat::Vertical);
+        QVERIFY(vertical->isChecked());
+        QVERIFY(!wide->isChecked());
+        QVERIFY(canvas->canvasSize() == QSize(1080, 1920));
+
+        QTest::mouseClick(wide, Qt::LeftButton);
+        QCoreApplication::processEvents();
+        QCOMPARE(canvas->format(), SceneFormat::Wide);
+        QVERIFY(wide->isChecked());
+        QVERIFY(!vertical->isChecked());
+    }
+
+    void cameraMonitorStaysHiddenInUnifiedWorkspaceWhenFramesArrive() {
         MainWindow window(nullptr, false);
         window.show();
         QTRY_VERIFY(window.isVisible());
 
         auto *edit = window.findChild<QPushButton *>(QStringLiteral("segmentedButton"));
-        auto *live = window.findChildren<QPushButton *>().value(0);
         for (QPushButton *button : window.findChildren<QPushButton *>()) {
             if (button->text() == QStringLiteral("Edit layout")) edit = button;
-            if (button->text() == QStringLiteral("Live")) live = button;
         }
         auto *selfView = window.findChild<CameraSelfView *>(QStringLiteral("cameraSelfView"));
         QVERIFY(edit);
-        QVERIFY(live);
         QVERIFY(selfView);
 
         QTest::mouseClick(edit, Qt::LeftButton);
@@ -293,11 +334,6 @@ private slots:
         QCoreApplication::processEvents();
         QVERIFY(selfView->isActive());
         QVERIFY(!selfView->isVisible());
-
-        QTest::mouseClick(live, Qt::LeftButton);
-        selfView->setFrame(QImage(320, 180, QImage::Format_ARGB32));
-        QCoreApplication::processEvents();
-        QVERIFY(selfView->isVisible());
     }
 
     void contextMenusAreAvailableAcrossCanvasAndLists() {
@@ -345,10 +381,18 @@ private slots:
 
         auto *selfView = window.findChild<CameraSelfView *>(QStringLiteral("cameraSelfView"));
         QVERIFY(selfView);
-        selfView->setActive(true);
-        selfView->setFrame(QImage(320, 180, QImage::Format_ARGB32));
+        QVERIFY(!selfView->isVisible());
+
+        QPushButton *projectsButton = nullptr;
+        for (QPushButton *button : window.findChildren<QPushButton *>()) {
+            if (button->text() == QStringLiteral("Projects")) projectsButton = button;
+        }
+        QVERIFY(projectsButton);
+        QTest::mouseClick(projectsButton, Qt::LeftButton);
         QCoreApplication::processEvents();
-        openAndClose(selfView, QStringLiteral("cameraMonitorContextMenu"), selfView->rect().center());
+        auto *projects = window.findChild<QListWidget *>(QStringLiteral("projectList"));
+        QVERIFY(projects);
+        openAndClose(projects->viewport(), QStringLiteral("projectContextMenu"), QPoint(4, 4));
     }
 
     void inspectorReflectsSelectedLayerOpacityAndMask() {
@@ -482,8 +526,14 @@ private slots:
 
         auto *session = window.findChild<RecordingSession *>();
         QVERIFY(session);
+        auto *canvas = window.findChild<SceneCanvas *>(QStringLiteral("sceneCanvas"));
+        auto *editButton = window.findChild<QPushButton *>(QStringLiteral("segmentedButton"));
+        QVERIFY(canvas);
+        QVERIFY(editButton);
         QVERIFY(session->start(created.project, {}));
         QTRY_COMPARE(session->state(), RecordingState::Recording);
+        QVERIFY(!canvas->editingEnabled());
+        QVERIFY(!editButton->isEnabled());
 
         QSignalSpy destroyed(&window, &QObject::destroyed);
         window.close();
@@ -497,6 +547,7 @@ private slots:
                 QStringLiteral("Stop recording before closing UxPlay Studio"));
         }));
         QVERIFY(session->stop());
+        QTRY_VERIFY(canvas->editingEnabled());
     }
 
     void recordAndExportAreGatedWithActionableFeedback() {

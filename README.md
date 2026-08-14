@@ -14,13 +14,13 @@ UxPlay Studio keeps the receiver, live video, OBS-style sources and layers, reco
 ## Highlights
 
 - Embedded AirPlay video in the main app window
-- True borderless fullscreen with `F11` and `Esc`, plus an optional in-app camera self-view; no app chrome or detached window
+- True borderless fullscreen of the composed scene with `F11` and `Esc`; no app chrome or detached window
 - Native Studio workspace with source/layer ordering, visibility, locking, multi-selection, and undo/redo
-- Stage-first creator interface with compact navigation, contextual live/edit controls, source cards, and an exact transform inspector
+- Stage-first creator interface with one OBS-style canvas workspace, source cards, context menus, and an exact transform inspector
 - Direct canvas manipulation: drag, resize, crop with `Alt`, rotate, snap, fit, center, opacity, and masks
-- Independent 16:9 Wide and 9:16 Vertical compositions saved in each project
+- Independent 16:9 Wide and 9:16 Vertical compositions saved in each project, switched with exclusive canvas tabs
 - Local crash-recoverable recording with separate direct AirPlay video, system-audio loopback, camera, and microphone tracks
-- Live presenter-camera preview with a draggable, resizable self-view contained inside the Studio window
+- Live presenter-camera preview rendered directly into the camera scene layer, with no duplicate monitor overlay
 - Background MP4 export that applies position, size, crop, arbitrary rotation, opacity, and shape masks
 - Bounded asynchronous AirPlay handoff keeps muxing and finalization off the live decode/render path
 - First-sample timestamps align independently captured camera, microphone, system audio, and AirPlay video on export
@@ -49,7 +49,7 @@ Windows may display a SmartScreen warning because community builds are not code-
 3. Open Control Center on the Apple device.
 4. Select **Screen Mirroring**, then select the receiver name shown by UxPlay Studio.
 
-Use **Edit layout** to arrange sources without leaving the app. Adding or enabling Camera starts an in-app self-view that can be moved and resized independently of the exported camera layer and remains available in fullscreen. Recording always creates a new local project under `Videos\UxPlay Studio`; enabling camera or microphone creates independent presenter tracks. Stop recording before exporting, choose Wide or Vertical, then select **Export MP4**. See the [Studio guide](docs/STUDIO-GUIDE.md) for canvas controls and recovery behavior.
+The single **Edit layout** workspace combines the live mirror preview and OBS-style scene editor; there is no separate Live page or second monitor. Arrange sources directly on the canvas, use the `16:9` and `9:16` tabs to switch independent compositions, and use right-click menus on the canvas, Sources, Layers, and Projects for contextual actions. Adding or enabling Camera renders its preview in the camera layer, so the canvas remains the source of truth. Recording always creates a new local project under `Videos\UxPlay Studio`; enabling camera or microphone creates independent presenter tracks. Stop recording before exporting, then select **Export MP4**. See the [Studio guide](docs/STUDIO-GUIDE.md) for canvas controls and recovery behavior.
 
 Some managed, hotel, dorm, or guest Wi-Fi networks block multicast DNS or isolate clients. In that case use a network that permits device-to-device traffic, or enable the Bluetooth discovery fallback. A hotspot is not required when normal Wi-Fi permits discovery and local traffic.
 
@@ -79,15 +79,15 @@ On Windows, `.\build.ps1 package -Architecture x64 -SkipBootstrap -SkipInstaller
 ```text
 Qt MainWindow
   ├─ Studio
-  │    ├─ Live / native VideoSurface (HWND)
-  │    ├─ SceneCanvas + SceneDocument (Wide and Vertical)
+  │    ├─ SceneCanvas + SceneDocument (Wide and Vertical) — the single user-facing preview/editor
+  │    ├─ hidden native VideoSurface (HWND) receiver target
   │    └─ Sources, Layers, Record dock
   ├─ Projects / atomic ProjectStore + recovery
   ├─ Activity, Settings, Diagnostics
   ├─ RecordingSession
   │    ├─ bounded encoded-AirPlay handoff → mux worker → 30-second Matroska segments
   │    ├─ independent system-audio, camera, and microphone tracks + measured first-sample offsets
-  │    └─ bounded in-app camera preview / self-view
+  │    └─ bounded camera preview frames rendered into SceneCanvas layers
   ├─ ExportJob / GStreamer compositor + Cairo masks
   └─ ReceiverEngine state machine
        └─ vendored libuxplay

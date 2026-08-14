@@ -4,15 +4,18 @@ UxPlay Studio 2 keeps mirroring, layout editing, recording, recovery, and export
 
 ## Studio workspace
 
-- **Live** shows the direct embedded AirPlay renderer. This is the lowest-latency view and the target used by fullscreen.
-- **Edit layout** shows the composition canvas. Select one or more layers, drag to move, use the handles to resize, and drag a handle while holding `Alt` to crop. The rotation handle is above the selected layer.
+UxPlay Studio uses one OBS-style workspace: **Edit layout** is both the live mirror preview and the composition editor. There is no separate Live page and no second user-facing monitor. The native AirPlay video target stays embedded internally while bounded preview frames are rendered into the selected scene layer.
+
+Use the exclusive **16:9** and **9:16** tabs to switch between independent 1920×1080 and 1080×1920 compositions. Select one or more layers, drag to move, use the edge/corner handles to resize, and drag a handle while holding `Alt` to crop. The top dot rotates the selected layer; the top edge handle always wins when expanding upward, including when zoomed out.
+
+Right-click the canvas, a layer, a source, or a project for contextual actions such as add, duplicate, reorder, fit, rotate, lock, delete, open, and refresh. The canvas footer also exposes fit and zoom controls, and the hint explains the discoverability shortcuts.
 - Arrow keys nudge a selection by 8 canvas pixels. Hold `Shift` for 24 pixels. Hold `Ctrl` while dragging to temporarily disable snapping.
 - **Fit**, **Center**, and **Reset** are non-destructive commands and participate in undo/redo.
 - The Wide and Vertical buttons switch between independent 1920×1080 and 1080×1920 compositions. Editing one does not overwrite the other.
 
 ## Sources and layers
 
-AirPlay is created automatically. Camera, image, text, and color sources can be added from the Sources section. Each source gets a layer in both output formats; transforms remain independent. Adding Camera also starts a live presenter preview. Its small self-view can be dragged or resized inside the Studio window and stays available in fullscreen; that viewing position is independent of the camera layer used by export.
+AirPlay is created automatically. Camera, image, text, and color sources can be added from the Sources section. Each source gets a layer in both output formats; transforms remain independent. Adding Camera starts a live presenter preview rendered directly in its scene layer, so the canvas preview and export layout stay aligned without a duplicate native self-view.
 
 Layers are drawn from bottom to top. Drag them in the list or use Up/Down to change order. A layer can be hidden, locked, removed, given an opacity, or masked as a rounded rectangle or circle. Crop, rotation, opacity, and masks are applied by the MP4 exporter as well as the canvas preview.
 
@@ -37,7 +40,7 @@ Open a Ready project in Studio, choose Wide or Vertical, adjust the layers, and 
 
 ## Shortcuts
 
-- `F11`: live borderless fullscreen (the optional camera self-view remains available)
+- `F11`: composed-scene borderless fullscreen
 - `Esc`: leave fullscreen
 - `Ctrl+Z` / `Ctrl+Y`: undo / redo on the canvas
 - Arrow keys: nudge selected unlocked layers

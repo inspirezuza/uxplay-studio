@@ -163,6 +163,15 @@ QPushButton#segmentedButton:checked {
     border-color: #424650;
     color: #FFFFFF;
 }
+QPushButton#segmentedButton[role="formatTab"] {
+    min-width: 52px;
+    padding: 0 9px;
+}
+QPushButton#segmentedButton[role="formatTab"]:checked {
+    background: #304A7A;
+    border-color: #5E8DE2;
+    color: #FFFFFF;
+}
 
 QStackedWidget#previewStack,
 QWidget#videoSurface,
@@ -450,7 +459,8 @@ QWidget#page[fullscreen="true"],
 QWidget#playerCard[fullscreen="true"],
 QWidget#videoSurface[fullscreen="true"],
 QWidget#videoSurface[fullscreen="true"] QWidget#nativeVideoTarget,
-QWidget#videoSurface[fullscreen="true"] QWidget#videoPlaceholder {
+QWidget#videoSurface[fullscreen="true"] QWidget#videoPlaceholder,
+QGraphicsView#sceneCanvas[fullscreen="true"] {
     background: #000000;
     border: 0;
     border-radius: 0;

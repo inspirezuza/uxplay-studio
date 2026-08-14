@@ -226,6 +226,37 @@ void SceneCanvas::setDocument(SceneDocument *document, SceneFormat format) {
 SceneDocument *SceneCanvas::document() const { return m_document; }
 SceneFormat SceneCanvas::format() const { return m_format; }
 
+void SceneCanvas::setPresentationMode(bool enabled) {
+    if (m_presentationMode == enabled) return;
+    m_presentationMode = enabled;
+    if (enabled) {
+        m_interaction = Interaction::None;
+        m_activeLayer.clear();
+        m_beforeInteraction.clear();
+        clearLayerSelection();
+        unsetCursor();
+        fitCanvas();
+    }
+    viewport()->setCursor(enabled ? Qt::BlankCursor : Qt::ArrowCursor);
+    viewport()->update();
+}
+
+bool SceneCanvas::presentationMode() const { return m_presentationMode; }
+
+void SceneCanvas::setEditingEnabled(bool enabled) {
+    if (m_editingEnabled == enabled) return;
+    m_editingEnabled = enabled;
+    if (!enabled) {
+        m_interaction = Interaction::None;
+        m_activeLayer.clear();
+        m_beforeInteraction.clear();
+        unsetCursor();
+    }
+    viewport()->update();
+}
+
+bool SceneCanvas::editingEnabled() const { return m_editingEnabled; }
+
 void SceneCanvas::setFormat(SceneFormat format) {
     if (m_format == format) return;
     m_format = format;
@@ -490,6 +521,10 @@ void SceneCanvas::wheelEvent(QWheelEvent *event) {
 }
 
 void SceneCanvas::contextMenuEvent(QContextMenuEvent *event) {
+    if (m_presentationMode || !m_editingEnabled) {
+        event->ignore();
+        return;
+    }
     LayerItem *item = layerItemAt(event->pos());
     const QString layerId = item ? item->layerId() : QString();
     if (!layerId.isEmpty() && !selectedLayerIds().contains(layerId))
@@ -499,6 +534,10 @@ void SceneCanvas::contextMenuEvent(QContextMenuEvent *event) {
 }
 
 void SceneCanvas::keyPressEvent(QKeyEvent *event) {
+    if (m_presentationMode || !m_editingEnabled) {
+        event->ignore();
+        return;
+    }
     if (event->matches(QKeySequence::Undo)) { m_undoStack.undo(); event->accept(); return; }
     if (event->matches(QKeySequence::Redo)) { m_undoStack.redo(); event->accept(); return; }
     if (event->modifiers().testFlag(Qt::ControlModifier) &&
@@ -555,6 +594,10 @@ SceneCanvas::LayerItem *SceneCanvas::layerItemAt(const QPoint &viewPosition) con
 }
 
 void SceneCanvas::mousePressEvent(QMouseEvent *event) {
+    if (m_presentationMode || !m_editingEnabled) {
+        event->accept();
+        return;
+    }
     LayerItem *item = layerItemAt(event->pos());
     if (!item || event->button() != Qt::LeftButton) {
         QGraphicsView::mousePressEvent(event);
@@ -620,6 +663,10 @@ QRectF SceneCanvas::snappedFrame(const QRectF &frame, bool disableSnap) const {
 }
 
 void SceneCanvas::mouseMoveEvent(QMouseEvent *event) {
+    if (m_presentationMode || !m_editingEnabled) {
+        event->accept();
+        return;
+    }
     if (m_interaction == Interaction::None || m_beforeInteraction.isEmpty()) {
         QGraphicsView::mouseMoveEvent(event);
         return;
@@ -667,6 +714,10 @@ void SceneCanvas::mouseMoveEvent(QMouseEvent *event) {
 }
 
 void SceneCanvas::mouseReleaseEvent(QMouseEvent *event) {
+    if (m_presentationMode || !m_editingEnabled) {
+        event->accept();
+        return;
+    }
     if (m_interaction == Interaction::None) {
         QGraphicsView::mouseReleaseEvent(event);
         return;
@@ -688,6 +739,7 @@ void SceneCanvas::mouseReleaseEvent(QMouseEvent *event) {
 
 void SceneCanvas::drawForeground(QPainter *painter, const QRectF &rect) {
     Q_UNUSED(rect)
+    if (m_presentationMode) return;
     if (!m_scene || m_scene->sceneRect().isEmpty()) return;
     painter->save();
     QPen border(QColor(QStringLiteral("#79A7FF")), 1.0);

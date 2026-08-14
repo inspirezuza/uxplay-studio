@@ -65,7 +65,7 @@ private:
     QWidget *createDiagnosticsPage();
     QPushButton *createNavigationButton(const QString &text, int page);
     void selectPage(int page);
-    void setStudioMode(bool edit);
+    void ensureStudioWorkspace();
     void setSceneFormat(bool vertical);
     void setRecordingUiLocked(bool locked);
     void deleteSelectedLayers();
@@ -77,6 +77,7 @@ private:
     void showLayerContextMenu(const QString &layerId, const QPoint &globalPosition);
     void showLayerListContextMenu(const QPoint &position);
     void showSourceListContextMenu(const QPoint &position);
+    void showProjectListContextMenu(const QPoint &position);
     void showCameraMonitorContextMenu(const QPoint &globalPosition);
     void refreshProjectList();
     bool openProjectDirectory(const QString &directory);
@@ -199,7 +200,6 @@ private:
     QLabel *m_recordingStatus = nullptr;
     QLabel *m_sourceCount = nullptr;
     QPushButton *m_recordButton = nullptr;
-    QPushButton *m_liveModeButton = nullptr;
     QPushButton *m_editModeButton = nullptr;
     QPushButton *m_wideButton = nullptr;
     QPushButton *m_verticalButton = nullptr;

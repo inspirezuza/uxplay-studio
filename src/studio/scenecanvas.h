@@ -22,6 +22,10 @@ public:
     void setDocument(SceneDocument *document, SceneFormat format);
     SceneDocument *document() const;
     SceneFormat format() const;
+    void setPresentationMode(bool enabled);
+    bool presentationMode() const;
+    void setEditingEnabled(bool enabled);
+    bool editingEnabled() const;
     void setFormat(SceneFormat format);
     QSize canvasSize() const;
 
@@ -96,6 +100,8 @@ private:
     QUndoStack m_undoStack;
     qreal m_viewScale = 1.0;
     bool m_autoFit = true;
+    bool m_presentationMode = false;
+    bool m_editingEnabled = true;
     bool m_snapEnabled = true;
     Interaction m_interaction = Interaction::None;
     QString m_activeLayer;
