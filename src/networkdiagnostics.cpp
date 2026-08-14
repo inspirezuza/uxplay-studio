@@ -18,16 +18,18 @@
 #endif
 
 namespace {
-bool isPrivateIpv4(const QString &address) {
+bool parseIpv4Octets(const QString &address, int *first, int *second,
+                     int *third, int *fourth) {
     const QStringList octets = address.split(QLatin1Char('.'));
     if (octets.size() != 4) return false;
-    bool ok = false;
-    const int first = octets.at(0).toInt(&ok);
-    if (!ok) return false;
-    if (first == 10 || first == 192) return true;
-    if (first != 172) return false;
-    const int second = octets.at(1).toInt(&ok);
-    return ok && second >= 16 && second <= 31;
+    int *values[] = {first, second, third, fourth};
+    for (int index = 0; index < 4; ++index) {
+        bool ok = false;
+        const int value = octets.at(index).toInt(&ok);
+        if (!ok || value < 0 || value > 255) return false;
+        *values[index] = value;
+    }
+    return true;
 }
 
 int addressPreference(const QNetworkInterface &networkInterface, const QString &address) {
@@ -39,7 +41,7 @@ int addressPreference(const QNetworkInterface &networkInterface, const QString &
     } else if (name.contains(QStringLiteral("ethernet"))) {
         score += 50;
     }
-    if (isPrivateIpv4(address)) score += 30;
+    if (NetworkDiagnostics::isPrivateIpv4Address(address)) score += 30;
     if (address.startsWith(QStringLiteral("169.254."))) score -= 200;
     if (name.contains(QStringLiteral("virtual")) || name.contains(QStringLiteral("vethernet")) ||
         name.contains(QStringLiteral("bluetooth")) || name.contains(QStringLiteral("vpn")) ||
@@ -48,6 +50,19 @@ int addressPreference(const QNetworkInterface &networkInterface, const QString &
     }
     return score;
 }
+
+}
+
+bool NetworkDiagnostics::isPrivateIpv4Address(const QString &address) {
+    int first = 0;
+    int second = 0;
+    int third = 0;
+    int fourth = 0;
+    if (!parseIpv4Octets(address, &first, &second, &third, &fourth)) return false;
+    Q_UNUSED(third)
+    Q_UNUSED(fourth)
+    return first == 10 || (first == 172 && second >= 16 && second <= 31) ||
+           (first == 192 && second == 168);
 }
 
 QString NetworkDiagnostics::primaryAddress() {

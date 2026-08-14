@@ -1,5 +1,6 @@
 #include "studio/scenecanvas.h"
 
+#include <QImage>
 #include <QSignalSpy>
 #include <QtTest>
 
@@ -137,6 +138,35 @@ private slots:
         canvas.fitCanvas();
         QCOMPARE(canvas.zoomPercent(), 100);
         QCOMPARE(canvas.sceneRect(), sceneBounds);
+    }
+
+    void clearingSourcePreviewRemovesTheLastFrame() {
+        SceneDocument document;
+        const QString source = document.addSource(SceneSourceType::AirPlay,
+                                                   QStringLiteral("iPad"));
+        const QString layer = document.addLayer(SceneFormat::Wide, source);
+
+        SceneCanvas canvas;
+        canvas.resize(960, 600);
+        canvas.setDocument(&document, SceneFormat::Wide);
+        canvas.show();
+        QTRY_VERIFY(canvas.isVisible());
+        QImage frame(32, 18, QImage::Format_ARGB32_Premultiplied);
+        frame.fill(QColor(QStringLiteral("#e45767")));
+        canvas.setSourcePreview(source, frame);
+        QCoreApplication::processEvents();
+        const QPoint sample = canvas.mapFromScene(QPointF(480, 480));
+        const QColor renderedFrame = canvas.viewport()->grab().toImage().pixelColor(sample);
+        QCOMPARE(renderedFrame.red(), 228);
+        QCOMPARE(renderedFrame.green(), 87);
+        QCOMPARE(renderedFrame.blue(), 103);
+        canvas.setSourcePreview(source, {});
+        canvas.setFormat(SceneFormat::Vertical);
+        canvas.setFormat(SceneFormat::Wide);
+        QCoreApplication::processEvents();
+        const QColor placeholder = canvas.viewport()->grab().toImage().pixelColor(sample);
+        QVERIFY(placeholder != renderedFrame);
+        QVERIFY(document.layer(SceneFormat::Wide, layer) != nullptr);
     }
 
     void topResizeHandleWinsOverRotateHandleAtZoomOut() {

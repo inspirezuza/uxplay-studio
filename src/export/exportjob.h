@@ -4,6 +4,8 @@
 
 #include <QObject>
 
+#include <atomic>
+
 class QThread;
 
 class ExportJob final : public QObject {
@@ -23,4 +25,5 @@ signals:
 private:
     ProjectStore *m_store = nullptr;
     QThread *m_thread = nullptr;
+    std::atomic_bool m_active{false};
 };

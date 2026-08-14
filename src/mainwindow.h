@@ -110,6 +110,7 @@ private:
     bool autostartEnabled() const;
     void setAutostart(bool enabled);
     bool hasActiveRecordingWork() const;
+    bool hasActiveExportWork() const;
     void showBlockedExitFeedback(const QString &statusMessage, const QString &activityMessage);
 
     void enterFullscreen();

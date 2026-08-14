@@ -78,9 +78,44 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <tlhelp32.h>
 #endif
 
 namespace {
+#ifdef Q_OS_WIN
+void terminateBeaconProcesses(const QString &expectedPath) {
+    const QString normalizedExpected = QDir::cleanPath(QDir::fromNativeSeparators(expectedPath));
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return;
+
+    PROCESSENTRY32W entry {};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (entry.th32ProcessID == GetCurrentProcessId()) continue;
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION |
+                                          PROCESS_TERMINATE | SYNCHRONIZE,
+                                          FALSE, entry.th32ProcessID);
+            if (!process) continue;
+            WCHAR imagePath[MAX_PATH] {};
+            DWORD imagePathLength = MAX_PATH;
+            const bool hasPath = QueryFullProcessImageNameW(
+                process, 0, imagePath, &imagePathLength) != FALSE;
+            const QString actualPath = hasPath
+                ? QDir::cleanPath(QDir::fromNativeSeparators(
+                      QString::fromWCharArray(imagePath, static_cast<int>(imagePathLength))))
+                : QString();
+            if (hasPath && actualPath.compare(normalizedExpected, Qt::CaseInsensitive) == 0) {
+                TerminateProcess(process, 0);
+                WaitForSingleObject(process, 2000);
+            }
+            CloseHandle(process);
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+}
+#endif
+
 QLabel *mutedLabel(const QString &text, QWidget *parent = nullptr) {
     auto *label = new QLabel(text, parent);
     label->setObjectName(QStringLiteral("mutedLabel"));
@@ -2330,18 +2365,21 @@ void MainWindow::startBluetoothBeacon() {
 }
 
 void MainWindow::stopBluetoothBeacon() {
-    if (!m_beacon) {
-        return;
-    }
-    if (m_beacon->state() != QProcess::NotRunning) {
-        m_beacon->terminate();
-        if (!m_beacon->waitForFinished(800)) {
-            m_beacon->kill();
-            m_beacon->waitForFinished(200);
+    if (m_beacon) {
+        if (m_beacon->state() != QProcess::NotRunning) {
+            m_beacon->terminate();
+            if (!m_beacon->waitForFinished(800)) {
+                m_beacon->kill();
+                m_beacon->waitForFinished(200);
+            }
         }
+        delete m_beacon;
+        m_beacon = nullptr;
     }
-    delete m_beacon;
-    m_beacon = nullptr;
+#ifdef Q_OS_WIN
+    terminateBeaconProcesses(QDir(QApplication::applicationDirPath())
+                                  .filePath(QStringLiteral("uxplay-bluetooth-beacon.exe")));
+#endif
 }
 
 bool MainWindow::ensureBonjourAvailable() {
@@ -2491,6 +2529,10 @@ bool MainWindow::hasActiveRecordingWork() const {
     return false;
 }
 
+bool MainWindow::hasActiveExportWork() const {
+    return m_exportJob && m_exportJob->isRunning();
+}
+
 void MainWindow::showBlockedExitFeedback(const QString &statusMessage,
                                          const QString &activityMessage) {
     if (m_recordingStatus) m_recordingStatus->setText(statusMessage);
@@ -2502,6 +2544,12 @@ void MainWindow::quitApplication() {
         showBlockedExitFeedback(
             QStringLiteral("Stop recording before quitting UxPlay Studio"),
             QStringLiteral("Quit was blocked because recording media is still active."));
+        return;
+    }
+    if (hasActiveExportWork()) {
+        showBlockedExitFeedback(
+            QStringLiteral("Wait for the export to finish before quitting UxPlay Studio"),
+            QStringLiteral("Quit was blocked because an MP4 export is still running."));
         return;
     }
     m_quitting = true;
@@ -2519,6 +2567,13 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         showBlockedExitFeedback(
             QStringLiteral("Stop recording before closing UxPlay Studio"),
             QStringLiteral("Close was blocked because recording media is still active."));
+        event->ignore();
+        return;
+    }
+    if (hasActiveExportWork()) {
+        showBlockedExitFeedback(
+            QStringLiteral("Wait for the export to finish before closing UxPlay Studio"),
+            QStringLiteral("Close was blocked because an MP4 export is still running."));
         event->ignore();
         return;
     }

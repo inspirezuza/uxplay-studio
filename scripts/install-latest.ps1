@@ -57,26 +57,37 @@ if (-not [StringComparer]::OrdinalIgnoreCase.Equals($resolvedInstallRoot, $expec
     throw "Refusing to install outside the per-user UxPlay Studio directory: $resolvedInstallRoot"
 }
 
-# Clear every legacy UxPlay process before replacing the install. The app uses
-# one global mutex, so an old developer-path process can otherwise intercept a
-# Start Menu launch and bring its stale UI back to the foreground.
+# Do not replace a bundle while any Studio process is alive. The app uses one
+# global mutex, and a legacy developer build may still be recording or
+# exporting with no reliable shutdown contract. Fail closed so packaging never
+# destroys another session's media or state.
 $running = Get-Process -Name "uxplay-studio" -ErrorAction SilentlyContinue |
     Where-Object { $_.Id -ne $PID }
 foreach ($process in @($running)) {
     $processPath = ""
     try { $processPath = $process.Path } catch {}
-    $isCurrentInstall = [StringComparer]::OrdinalIgnoreCase.Equals(
-        $processPath,
-        $resolvedInstallRoot + "\uxplay-studio.exe"
-    )
     $process.CloseMainWindow() | Out-Null
     if ($process.WaitForExit(10000)) { continue }
-    if ($isCurrentInstall) {
-        throw "UxPlay Studio is still running. Stop recording and close it before installing the latest build."
+    $pathHint = if ($processPath) { " ($processPath)" } else { "" }
+    throw "UxPlay Studio is still running$pathHint. Stop recording/export and close it before installing the latest build."
+}
+
+# The BLE helper has no window and older bundles could leave its PyInstaller
+# child alive after the Studio process exited. It owns no recording media, so
+# clean only helpers whose executable path is the managed install we are about
+# to replace; unrelated helpers are left alone and the file removal below will
+# fail closed if they still hold a lock.
+$managedBeaconPath = [IO.Path]::GetFullPath(
+    (Join-Path $resolvedInstallRoot "uxplay-bluetooth-beacon.exe"))
+$beacons = Get-Process -Name "uxplay-bluetooth-beacon" -ErrorAction SilentlyContinue
+foreach ($process in @($beacons)) {
+    $processPath = ""
+    try { $processPath = $process.Path } catch {}
+    if (-not $processPath -or
+        -not [StringComparer]::OrdinalIgnoreCase.Equals(
+            [IO.Path]::GetFullPath($processPath), $managedBeaconPath)) {
+        continue
     }
-    # A legacy developer build has no reliable recording-state contract. It is
-    # explicitly outside the managed install, so force-close only that stale
-    # process to release the single-instance mutex and leave one clean app.
     Stop-Process -Id $process.Id -Force -ErrorAction Stop
     $process.WaitForExit(5000) | Out-Null
 }

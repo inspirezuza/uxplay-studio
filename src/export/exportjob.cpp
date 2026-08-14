@@ -153,7 +153,7 @@ ExportJob::~ExportJob() {
     }
 }
 
-bool ExportJob::isRunning() const { return m_thread && m_thread->isRunning(); }
+bool ExportJob::isRunning() const { return m_active.load(std::memory_order_acquire); }
 
 bool ExportJob::start(const ProjectInfo &project, const SceneDocument &scene,
                       SceneFormat format, const QString &outputPath) {
@@ -283,7 +283,13 @@ bool ExportJob::start(const ProjectInfo &project, const SceneDocument &scene,
         }
     });
     connect(m_thread, &QThread::finished, m_thread, &QObject::deleteLater);
-    connect(m_thread, &QThread::finished, this, [this]() { m_thread = nullptr; });
+    m_active.store(true, std::memory_order_release);
+    connect(m_thread, &QThread::finished, this, [this]() {
+        m_active.store(false, std::memory_order_release);
+    }, Qt::DirectConnection);
+    connect(m_thread, &QThread::finished, this, [this]() {
+        m_thread = nullptr;
+    });
     m_thread->start();
     return true;
 }

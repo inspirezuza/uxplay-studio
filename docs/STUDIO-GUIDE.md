@@ -36,7 +36,7 @@ If an optional device is unavailable, the main AirPlay recording continues and t
 
 Projects left in Recording or Finalizing state after an interruption are marked **Recoverable** on the next launch. Open Projects, select the entry, then choose **Recover session**. Studio validates finalized Matroska streams before marking the project Ready, retains usable segments, and renames rejected partial/corrupt fragments with an `.incomplete` suffix rather than deleting them. A project without usable AirPlay video stays Recoverable and explains why. An interrupted export does not damage its source project: Studio returns the project to Ready and removes the unpublished `.partial` output.
 
-Open a Ready project in Studio, choose Wide or Vertical, adjust the layers, and select **Export MP4**. Recoverable projects must pass **Recover session** first. Export runs in the background and writes to the project's `exports` folder. It uses the saved position, size, crop, arbitrary rotation, opacity, order, and masks, and mixes available system-loopback and microphone audio. The final MP4 name appears only after the export pipeline completes.
+Open a Ready project in Studio, choose Wide or Vertical, adjust the layers, and select **Export MP4**. Recoverable projects must pass **Recover session** first. Export runs in the background and writes to the project's `exports` folder. It uses the saved position, size, crop, arbitrary rotation, opacity, order, and masks, and mixes available system-loopback and microphone audio. The final MP4 name appears only after the export pipeline completes. Closing or quitting Studio is blocked while an export is active so the background job cannot be silently discarded.
 
 ## Shortcuts
 

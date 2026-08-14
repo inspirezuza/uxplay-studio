@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "networkdiagnostics.h"
 #include "projects/projectstore.h"
 #include "recording/recordingsession.h"
 #include "studio/cameraselfview.h"
@@ -66,6 +67,17 @@ private slots:
     void initTestCase() {
         gst_init(nullptr, nullptr);
         uxplay_set_recording_test_mode(1);
+    }
+
+    void privateIpv4ClassificationUsesRfc1918Subnets() {
+        QVERIFY(NetworkDiagnostics::isPrivateIpv4Address(QStringLiteral("10.24.8.3")));
+        QVERIFY(NetworkDiagnostics::isPrivateIpv4Address(QStringLiteral("172.16.0.1")));
+        QVERIFY(NetworkDiagnostics::isPrivateIpv4Address(QStringLiteral("172.31.255.254")));
+        QVERIFY(NetworkDiagnostics::isPrivateIpv4Address(QStringLiteral("192.168.89.88")));
+        QVERIFY(!NetworkDiagnostics::isPrivateIpv4Address(QStringLiteral("192.0.2.1")));
+        QVERIFY(!NetworkDiagnostics::isPrivateIpv4Address(QStringLiteral("192.167.1.1")));
+        QVERIFY(!NetworkDiagnostics::isPrivateIpv4Address(QStringLiteral("172.32.0.1")));
+        QVERIFY(!NetworkDiagnostics::isPrivateIpv4Address(QStringLiteral("not-an-ip")));
     }
 
     void cleanup() { uxplay_set_recording_test_runtime_failure(0); }

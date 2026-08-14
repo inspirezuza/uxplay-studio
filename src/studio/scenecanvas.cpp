@@ -430,8 +430,11 @@ QUndoStack *SceneCanvas::undoStack() { return &m_undoStack; }
 void SceneCanvas::refreshFromDocument() { syncItemsFromDocument(); }
 
 void SceneCanvas::setSourcePreview(const QString &sourceId, const QImage &frame) {
-    if (sourceId.isEmpty() || frame.isNull()) return;
-    m_sourcePreviews.insert(sourceId, frame);
+    if (sourceId.isEmpty()) return;
+    if (frame.isNull())
+        m_sourcePreviews.remove(sourceId);
+    else
+        m_sourcePreviews.insert(sourceId, frame);
     for (LayerItem *item : m_items) {
         if (item->sourceId() == sourceId) item->setPreview(frame);
     }
