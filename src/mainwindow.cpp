@@ -24,6 +24,7 @@
 #include <QCloseEvent>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -462,8 +463,8 @@ void MainWindow::setStudioMode(bool edit) {
     // is already rendered by its scene layer, so leaving this native overlay
     // visible would show the same feed twice.
     if (m_cameraSelfView) {
-        if (edit) m_cameraSelfView->hide();
-        else m_cameraSelfView->setActive(m_cameraSelfView->isActive());
+        m_cameraSelfView->setOverlayVisible(!edit);
+        if (!edit) m_cameraSelfView->setActive(m_cameraSelfView->isActive());
     }
     m_liveModeButton->setChecked(!edit);
     m_editModeButton->setChecked(edit);
@@ -494,6 +495,12 @@ void MainWindow::deleteSelectedLayers() {
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() == QEvent::ContextMenu &&
+        (watched == m_stageFrame || watched == m_previewStack || watched == m_playerCard)) {
+        auto *context = static_cast<QContextMenuEvent *>(event);
+        showCanvasContextMenu({}, context->globalPos());
+        return true;
+    }
     if (m_layerList && (watched == m_layerList || watched == m_layerList->viewport()) &&
         event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
@@ -687,13 +694,223 @@ void MainWindow::updateCanvasHint() {
     const QSize size = m_sceneCanvas->canvasSize();
     if (!size.isValid()) return;
     m_stageHint->setText(
-        QStringLiteral("Canvas %1 × %2 · %3% · Drag to move · corner handles resize · "
-                       "Alt+drag crops · Ctrl+wheel zooms · Ctrl+0 fits · "
-                       "drag dock separators to resize")
+        QStringLiteral("Canvas %1 × %2 · %3% · Drag to move · edge/corner handles resize · "
+                       "top dot rotates · Alt+drag crops · Ctrl+wheel zooms · Ctrl+0 fits · "
+                       "right-click for actions · drag dock separators to resize")
             .arg(size.width())
             .arg(size.height())
             .arg(m_sceneCanvas->zoomPercent()));
     if (m_zoomLabel) m_zoomLabel->setText(QStringLiteral("%1%").arg(m_sceneCanvas->zoomPercent()));
+}
+
+void MainWindow::showCanvasContextMenu(const QString &layerId, const QPoint &globalPosition) {
+    if (!layerId.isEmpty()) {
+        showLayerContextMenu(layerId, globalPosition);
+        return;
+    }
+    if (!m_sceneCanvas) return;
+
+    QMenu menu(this);
+    menu.setObjectName(QStringLiteral("canvasContextMenu"));
+    QAction *selectAll = menu.addAction(QStringLiteral("Select all layers"));
+    menu.addSeparator();
+    QAction *addCamera = menu.addAction(StudioVisuals::icon(QStringLiteral("camera")),
+                                        QStringLiteral("Add camera"));
+    QAction *addImage = menu.addAction(StudioVisuals::icon(QStringLiteral("image")),
+                                       QStringLiteral("Add image"));
+    QAction *addText = menu.addAction(StudioVisuals::icon(QStringLiteral("text")),
+                                      QStringLiteral("Add text"));
+    QAction *addColor = menu.addAction(StudioVisuals::icon(QStringLiteral("color")),
+                                       QStringLiteral("Add color"));
+    menu.addSeparator();
+    QAction *fitCanvas = menu.addAction(QStringLiteral("Fit canvas to view"));
+    QAction *zoomOut = menu.addAction(QStringLiteral("Zoom out"));
+    QAction *zoomIn = menu.addAction(QStringLiteral("Zoom in"));
+    const bool editable = !hasActiveRecordingWork();
+    for (QAction *action : {selectAll, addCamera, addImage, addText, addColor})
+        action->setEnabled(editable);
+
+    QAction *chosen = menu.exec(globalPosition);
+    if (!chosen) return;
+    if (chosen == selectAll) {
+        m_layerList->selectAll();
+        m_sceneCanvas->clearLayerSelection();
+        for (QListWidgetItem *item : m_layerList->selectedItems())
+            m_sceneCanvas->selectLayer(item->data(Qt::UserRole).toString(), true);
+    } else if (chosen == addCamera) {
+        addStudioSource(1);
+    } else if (chosen == addImage) {
+        addStudioSource(2);
+    } else if (chosen == addText) {
+        addStudioSource(3);
+    } else if (chosen == addColor) {
+        addStudioSource(4);
+    } else if (chosen == fitCanvas) {
+        m_sceneCanvas->fitCanvas();
+    } else if (chosen == zoomOut) {
+        m_sceneCanvas->zoomOut();
+    } else if (chosen == zoomIn) {
+        m_sceneCanvas->zoomIn();
+    }
+}
+
+void MainWindow::showLayerContextMenu(const QString &layerId, const QPoint &globalPosition) {
+    if (!m_sceneDocument || !m_sceneCanvas) return;
+    const SceneFormat format = static_cast<SceneFormat>(m_sceneFormat);
+    const SceneLayer *layer = m_sceneDocument->layer(format, layerId);
+    if (!layer) return;
+
+    if (m_layerList) {
+        QSignalBlocker blocker(m_layerList);
+        for (int row = 0; row < m_layerList->count(); ++row)
+            m_layerList->item(row)->setSelected(m_layerList->item(row)->data(Qt::UserRole).toString() == layerId);
+    }
+    m_sceneCanvas->clearLayerSelection();
+    m_sceneCanvas->selectLayer(layerId);
+    refreshLayerInspector();
+
+    QMenu menu(this);
+    menu.setObjectName(QStringLiteral("layerContextMenu"));
+    QAction *duplicate = menu.addAction(QStringLiteral("Duplicate layer"));
+    QAction *bringFront = menu.addAction(QStringLiteral("Bring to front"));
+    QAction *sendBack = menu.addAction(QStringLiteral("Send to back"));
+    menu.addSeparator();
+    QAction *fitLayer = menu.addAction(QStringLiteral("Fit layer to canvas"));
+    QAction *centerLayer = menu.addAction(QStringLiteral("Center layer"));
+    QAction *rotateClockwise = menu.addAction(QStringLiteral("Rotate clockwise 90°"));
+    QAction *rotateCounterClockwise = menu.addAction(QStringLiteral("Rotate counter-clockwise 90°"));
+    QAction *resetTransform = menu.addAction(QStringLiteral("Reset transform"));
+    menu.addSeparator();
+    QAction *visibility = menu.addAction(layer->visible ? QStringLiteral("Hide layer")
+                                                        : QStringLiteral("Show layer"));
+    QAction *lock = menu.addAction(layer->locked ? QStringLiteral("Unlock layer")
+                                                 : QStringLiteral("Lock layer"));
+    menu.addSeparator();
+    QAction *remove = menu.addAction(QStringLiteral("Delete layer"));
+
+    const bool editable = !hasActiveRecordingWork();
+    const bool transformable = editable && !layer->locked;
+    for (QAction *action : {duplicate, bringFront, sendBack, fitLayer, centerLayer,
+                            rotateClockwise, rotateCounterClockwise, resetTransform,
+                            visibility, lock, remove})
+        action->setEnabled(editable);
+    for (QAction *action : {fitLayer, centerLayer, rotateClockwise,
+                            rotateCounterClockwise, resetTransform, remove})
+        action->setEnabled(transformable);
+
+    QAction *chosen = menu.exec(globalPosition);
+    if (!chosen) return;
+    if (chosen == duplicate) {
+        const QString copyId = m_sceneDocument->duplicateLayer(format, layerId);
+        if (copyId.isEmpty()) return;
+        m_sceneCanvas->setDocument(m_sceneDocument.get(), format);
+        refreshLayerList();
+        m_sceneCanvas->selectLayer(copyId);
+        saveCurrentProject();
+    } else if (chosen == bringFront || chosen == sendBack) {
+        const auto &layers = m_sceneDocument->composition(format).layers;
+        int index = -1;
+        for (int i = 0; i < layers.size(); ++i)
+            if (layers.at(i).id == layerId) { index = i; break; }
+        if (index < 0) return;
+        const int destination = chosen == bringFront ? layers.size() - 1 : 0;
+        m_sceneDocument->moveLayer(format, layerId, destination);
+        m_sceneCanvas->setDocument(m_sceneDocument.get(), format);
+        refreshLayerList();
+        m_sceneCanvas->selectLayer(layerId);
+        saveCurrentProject();
+    } else if (chosen == fitLayer) {
+        m_sceneCanvas->fitSelection();
+    } else if (chosen == centerLayer) {
+        m_sceneCanvas->centerSelection();
+    } else if (chosen == rotateClockwise) {
+        m_sceneCanvas->rotateSelection(90.0);
+    } else if (chosen == rotateCounterClockwise) {
+        m_sceneCanvas->rotateSelection(-90.0);
+    } else if (chosen == resetTransform) {
+        m_sceneCanvas->resetSelection();
+    } else if (chosen == visibility) {
+        m_sceneDocument->setLayerVisible(format, layerId, !layer->visible);
+        m_sceneCanvas->refreshFromDocument();
+        refreshLayerList();
+        m_sceneCanvas->selectLayer(layerId);
+        saveCurrentProject();
+    } else if (chosen == lock) {
+        m_sceneDocument->setLayerLocked(format, layerId, !layer->locked);
+        m_sceneCanvas->refreshFromDocument();
+        refreshLayerList();
+        m_sceneCanvas->selectLayer(layerId);
+        saveCurrentProject();
+    } else if (chosen == remove) {
+        deleteSelectedLayers();
+    }
+}
+
+void MainWindow::showLayerListContextMenu(const QPoint &position) {
+    if (!m_layerList) return;
+    QListWidgetItem *item = m_layerList->itemAt(position);
+    const QPoint globalPosition = m_layerList->viewport()->mapToGlobal(position);
+    if (item) {
+        showLayerContextMenu(item->data(Qt::UserRole).toString(), globalPosition);
+    } else {
+        showCanvasContextMenu({}, globalPosition);
+    }
+}
+
+void MainWindow::showSourceListContextMenu(const QPoint &position) {
+    if (!m_sourceList || !m_sceneDocument) return;
+    QListWidgetItem *item = m_sourceList->itemAt(position);
+    const QPoint globalPosition = m_sourceList->viewport()->mapToGlobal(position);
+    if (!item) {
+        showCanvasContextMenu({}, globalPosition);
+        return;
+    }
+    m_sourceList->setCurrentItem(item);
+    const QString sourceId = item->data(Qt::UserRole).toString();
+    const SceneSource *source = m_sceneDocument->source(sourceId);
+    if (!source) return;
+    const SceneFormat format = static_cast<SceneFormat>(m_sceneFormat);
+    QMenu menu(this);
+    menu.setObjectName(QStringLiteral("sourceContextMenu"));
+    QAction *selectLayers = menu.addAction(QStringLiteral("Select layers using this source"));
+    QAction *addLayer = menu.addAction(QStringLiteral("Add another layer"));
+    QAction *removeSource = menu.addAction(QStringLiteral("Remove source"));
+    const bool editable = !hasActiveRecordingWork();
+    addLayer->setEnabled(editable);
+    removeSource->setEnabled(editable && source->type != SceneSourceType::AirPlay);
+    QAction *chosen = menu.exec(globalPosition);
+    if (!chosen) return;
+    if (chosen == selectLayers) {
+        // Setting the current source above already selected its existing layers.
+    } else if (chosen == addLayer) {
+        const QString layerId = m_sceneDocument->addLayer(format, sourceId);
+        if (layerId.isEmpty()) return;
+        m_sceneCanvas->setDocument(m_sceneDocument.get(), format);
+        refreshLayerList();
+        m_sceneCanvas->selectLayer(layerId);
+        saveCurrentProject();
+    } else if (chosen == removeSource) {
+        if (source->type == SceneSourceType::Camera && m_recordCamera)
+            m_recordCamera->setChecked(false);
+        if (!m_sceneDocument->removeSource(sourceId)) return;
+        m_sceneCanvas->setDocument(m_sceneDocument.get(), format);
+        refreshLayerList();
+        saveCurrentProject();
+    }
+}
+
+void MainWindow::showCameraMonitorContextMenu(const QPoint &globalPosition) {
+    if (!m_cameraSelfView) return;
+    QMenu menu(this);
+    menu.setObjectName(QStringLiteral("cameraMonitorContextMenu"));
+    QAction *editLayout = menu.addAction(QStringLiteral("Edit camera layout"));
+    QAction *hideMonitor = menu.addAction(QStringLiteral("Hide live camera monitor"));
+    QAction *chosen = menu.exec(globalPosition);
+    if (chosen == editLayout) {
+        if (m_editModeButton) m_editModeButton->click();
+    } else if (chosen == hideMonitor) {
+        m_cameraSelfView->setOverlayVisible(false);
+    }
 }
 
 void MainWindow::refreshProjectList() {
@@ -938,6 +1155,7 @@ QWidget *MainWindow::createPlayerPage() {
 
     m_previewStack = new QStackedWidget(m_playerCard);
     m_previewStack->setObjectName(QStringLiteral("previewStack"));
+    m_previewStack->installEventFilter(this);
     m_videoSurface = new VideoSurface(m_previewStack);
     m_sceneCanvas = new SceneCanvas(m_previewStack);
     m_sceneCanvas->setDocument(m_sceneDocument.get(), SceneFormat::Wide);
@@ -947,6 +1165,8 @@ QWidget *MainWindow::createPlayerPage() {
             [this](int) { updateCanvasHint(); });
     m_stageFrame = new QWidget(m_playerCard);
     m_stageFrame->setObjectName(QStringLiteral("stageFrame"));
+    m_stageFrame->installEventFilter(this);
+    m_playerCard->installEventFilter(this);
     m_stageLayout = new QVBoxLayout(m_stageFrame);
     m_stageLayout->setObjectName(QStringLiteral("stageLayout"));
     m_stageLayout->setContentsMargins(20, 18, 20, 12);
@@ -966,6 +1186,10 @@ QWidget *MainWindow::createPlayerPage() {
     m_stageLayout->addWidget(m_stageFooter);
     m_playerLayout->addWidget(m_stageFrame, 1);
     m_cameraSelfView = new CameraSelfView(m_previewStack);
+    connect(m_sceneCanvas, &SceneCanvas::contextMenuRequested, this,
+            &MainWindow::showCanvasContextMenu);
+    connect(m_cameraSelfView, &CameraSelfView::contextMenuRequested, this,
+            &MainWindow::showCameraMonitorContextMenu);
 
     m_playerControls = new QWidget(m_playerCard);
     m_playerControls->setObjectName(QStringLiteral("playerControls"));
@@ -1080,6 +1304,7 @@ QWidget *MainWindow::createPlayerPage() {
     sourceAreaSplitter->setChildrenCollapsible(false);
     m_sourceList = new QListWidget(sourceAreaSplitter);
     m_sourceList->setObjectName(QStringLiteral("sourceList"));
+    m_sourceList->setContextMenuPolicy(Qt::CustomContextMenu);
     m_sourceList->setMinimumHeight(72);
     sourceAreaSplitter->addWidget(m_sourceList);
     auto *belowSources = new QWidget(sourceAreaSplitter);
@@ -1115,6 +1340,7 @@ QWidget *MainWindow::createPlayerPage() {
     layerAreaSplitter->setChildrenCollapsible(false);
     m_layerList = new QListWidget(layerAreaSplitter);
     m_layerList->setObjectName(QStringLiteral("layerList"));
+    m_layerList->setContextMenuPolicy(Qt::CustomContextMenu);
     m_layerList->setMinimumHeight(72);
     m_layerList->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_layerList->setDragDropMode(QAbstractItemView::InternalMove);
@@ -1343,6 +1569,10 @@ QWidget *MainWindow::createPlayerPage() {
             m_layerList->item(i)->setSelected(ids.contains(m_layerList->item(i)->data(Qt::UserRole).toString()));
         refreshLayerInspector();
     });
+    connect(m_layerList, &QListWidget::customContextMenuRequested, this,
+            &MainWindow::showLayerListContextMenu);
+    connect(m_sourceList, &QListWidget::customContextMenuRequested, this,
+            &MainWindow::showSourceListContextMenu);
     m_layerList->installEventFilter(this);
     m_layerList->viewport()->installEventFilter(this);
     connect(m_sourceList, &QListWidget::currentItemChanged, this,

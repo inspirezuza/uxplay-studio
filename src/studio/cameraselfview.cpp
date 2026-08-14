@@ -1,6 +1,7 @@
 #include "cameraselfview.h"
 
 #include <QEvent>
+#include <QContextMenuEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -20,7 +21,7 @@ CameraSelfView::CameraSelfView(QWidget *parent) : QWidget(parent) {
 void CameraSelfView::setFrame(const QImage &frame) {
     if (frame.isNull()) return;
     m_frame = frame;
-    if (m_active) {
+    if (m_active && m_overlayVisible) {
         clampToParent();
         show();
         raise();
@@ -30,7 +31,7 @@ void CameraSelfView::setFrame(const QImage &frame) {
 
 void CameraSelfView::setActive(bool active) {
     m_active = active;
-    setVisible(active && !m_frame.isNull());
+    setVisible(active && m_overlayVisible && !m_frame.isNull());
     if (isVisible()) {
         clampToParent();
         raise();
@@ -41,9 +42,23 @@ bool CameraSelfView::isActive() const {
     return m_active;
 }
 
+void CameraSelfView::setOverlayVisible(bool visible) {
+    m_overlayVisible = visible;
+    setVisible(m_active && m_overlayVisible && !m_frame.isNull());
+    if (isVisible()) {
+        clampToParent();
+        raise();
+    }
+}
+
 bool CameraSelfView::eventFilter(QObject *watched, QEvent *event) {
     if (watched == parentWidget() && event->type() == QEvent::Resize) clampToParent();
     return QWidget::eventFilter(watched, event);
+}
+
+void CameraSelfView::contextMenuEvent(QContextMenuEvent *event) {
+    emit contextMenuRequested(event->globalPos());
+    event->accept();
 }
 
 void CameraSelfView::paintEvent(QPaintEvent *) {

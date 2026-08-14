@@ -9,6 +9,7 @@
 #include <QUndoStack>
 
 class QPainter;
+class QContextMenuEvent;
 class QWheelEvent;
 
 class SceneCanvas final : public QGraphicsView {
@@ -41,6 +42,7 @@ public:
     void fitSelection();
     void centerSelection();
     void resetSelection();
+    void rotateSelection(qreal deltaDegrees);
     void cropSelection(const QMarginsF &crop);
     void setSelectionOpacity(qreal opacity);
     void setSelectionMask(SceneMask mask);
@@ -57,10 +59,12 @@ signals:
     void layersChanged();
     void layerSelectionChanged(const QStringList &layerIds);
     void zoomChanged(int percent);
+    void contextMenuRequested(const QString &layerId, const QPoint &globalPosition);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;

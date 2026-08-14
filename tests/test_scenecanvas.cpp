@@ -138,6 +138,35 @@ private slots:
         QCOMPARE(canvas.zoomPercent(), 100);
         QCOMPARE(canvas.sceneRect(), sceneBounds);
     }
+
+    void topResizeHandleWinsOverRotateHandleAtZoomOut() {
+        SceneDocument document;
+        const QString source = document.addSource(SceneSourceType::Color,
+                                                   QStringLiteral("Resizable"));
+        const QString layerId = document.addLayer(SceneFormat::Wide, source);
+        SceneTransform transform;
+        transform.frame = QRectF(560, 320, 480, 300);
+        QVERIFY(document.setTransform(SceneFormat::Wide, layerId, transform));
+
+        SceneCanvas canvas;
+        canvas.resize(960, 600);
+        canvas.setDocument(&document, SceneFormat::Wide);
+        canvas.show();
+        QTRY_VERIFY(canvas.isVisible());
+        QVERIFY(canvas.selectLayer(layerId));
+        canvas.zoomOut();
+        canvas.zoomOut();
+
+        const QRectF before = document.layer(SceneFormat::Wide, layerId)->transform.frame;
+        const QPoint topHandle = canvas.mapFromScene(QPointF(before.center().x(), before.top()));
+        QTest::mousePress(canvas.viewport(), Qt::LeftButton, Qt::NoModifier, topHandle);
+        QTest::mouseMove(canvas.viewport(), topHandle - QPoint(0, 24));
+        QTest::mouseRelease(canvas.viewport(), Qt::LeftButton, Qt::NoModifier, topHandle - QPoint(0, 24));
+
+        const SceneTransform after = document.layer(SceneFormat::Wide, layerId)->transform;
+        QVERIFY(after.frame.top() < before.top());
+        QVERIFY(qFuzzyIsNull(after.rotationDegrees));
+    }
 };
 
 QTEST_MAIN(SceneCanvasTest)

@@ -2,6 +2,7 @@
 
 #include <QGraphicsRectItem>
 #include <QGraphicsScene>
+#include <QContextMenuEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -12,6 +13,7 @@
 #include <QWheelEvent>
 #include <QtMath>
 #include <algorithm>
+#include <cmath>
 #include <functional>
 
 namespace {
@@ -76,7 +78,10 @@ public:
     void setPreview(const QImage &preview) { m_preview = preview; update(); }
 
     QRectF boundingRect() const override {
-        return QGraphicsRectItem::boundingRect().adjusted(-18, -36, 18, 18);
+        // The rotate handle is kept a stable distance from the top resize
+        // handle in screen pixels. At zoom-out that requires more scene-space
+        // room than the layer rectangle itself.
+        return QGraphicsRectItem::boundingRect().adjusted(-18, -180, 18, 18);
     }
 
     void paint(QPainter *painter, const QStyleOptionGraphicsItem *option,
@@ -144,7 +149,9 @@ public:
             painter->setBrush(Qt::NoBrush);
             painter->drawRect(content);
             painter->setBrush(QColor(QStringLiteral("#f8fbff")));
-            const qreal handle = 10.0 / qMax<qreal>(0.2, painter->transform().m11());
+            const qreal viewScale = qMax<qreal>(0.05,
+                std::hypot(painter->transform().m11(), painter->transform().m12()));
+            const qreal handle = 10.0 / viewScale;
             const QList<QPointF> points{content.topLeft(), content.topRight(),
                                        content.bottomLeft(), content.bottomRight(),
                                        QPointF(content.center().x(), content.top()),
@@ -155,7 +162,7 @@ public:
                 painter->drawRect(QRectF(point.x() - handle / 2, point.y() - handle / 2,
                                          handle, handle));
             }
-            const QPointF rotatePoint(content.center().x(), content.top() - 26);
+            const QPointF rotatePoint(content.center().x(), content.top() - 28.0 / viewScale);
             painter->drawLine(QPointF(content.center().x(), content.top()), rotatePoint);
             painter->drawEllipse(rotatePoint, handle / 2, handle / 2);
             painter->restore();
@@ -344,6 +351,15 @@ void SceneCanvas::resetSelection() {
     pushTransforms(QStringLiteral("Reset layer transforms"), before, after);
 }
 
+void SceneCanvas::rotateSelection(qreal deltaDegrees) {
+    if (qFuzzyIsNull(deltaDegrees)) return;
+    const auto before = selectedTransforms();
+    auto after = before;
+    for (auto it = after.begin(); it != after.end(); ++it)
+        it->rotationDegrees += deltaDegrees;
+    pushTransforms(QStringLiteral("Rotate layers"), before, after);
+}
+
 void SceneCanvas::cropSelection(const QMarginsF &crop) {
     const auto before = selectedTransforms();
     auto after = before;
@@ -473,6 +489,15 @@ void SceneCanvas::wheelEvent(QWheelEvent *event) {
     QGraphicsView::wheelEvent(event);
 }
 
+void SceneCanvas::contextMenuEvent(QContextMenuEvent *event) {
+    LayerItem *item = layerItemAt(event->pos());
+    const QString layerId = item ? item->layerId() : QString();
+    if (!layerId.isEmpty() && !selectedLayerIds().contains(layerId))
+        selectLayer(layerId);
+    emit contextMenuRequested(layerId, event->globalPos());
+    event->accept();
+}
+
 void SceneCanvas::keyPressEvent(QKeyEvent *event) {
     if (event->matches(QKeySequence::Undo)) { m_undoStack.undo(); event->accept(); return; }
     if (event->matches(QKeySequence::Redo)) { m_undoStack.redo(); event->accept(); return; }
@@ -510,7 +535,23 @@ void SceneCanvas::keyPressEvent(QKeyEvent *event) {
 SceneCanvas::LayerItem *SceneCanvas::layerItemAt(const QPoint &viewPosition) const {
     QGraphicsItem *item = itemAt(viewPosition);
     while (item && !dynamic_cast<LayerItem *>(item)) item = item->parentItem();
-    return dynamic_cast<LayerItem *>(item);
+    if (auto *layer = dynamic_cast<LayerItem *>(item)) return layer;
+
+    // QGraphicsItem::shape() covers the layer body, not the external rotate
+    // handle. Resolve that handle explicitly for the selected layer so it
+    // remains usable after zooming out.
+    const qreal viewScale = qMax<qreal>(0.05,
+        std::hypot(transform().m11(), transform().m12()));
+    const qreal rotateOffset = 28.0 / viewScale;
+    for (LayerItem *candidate : m_items) {
+        if (!candidate->isSelected()) continue;
+        const QRectF rect = candidate->rect();
+        const QPointF rotateScene = candidate->mapToScene(
+            QPointF(rect.center().x(), rect.top() - rotateOffset));
+        if (QLineF(QPointF(viewPosition), mapFromScene(rotateScene)).length() <= 18.0)
+            return candidate;
+    }
+    return nullptr;
 }
 
 void SceneCanvas::mousePressEvent(QMouseEvent *event) {
@@ -528,14 +569,25 @@ void SceneCanvas::mousePressEvent(QMouseEvent *event) {
     m_pressScenePosition = mapToScene(event->pos());
     const QPointF local = item->mapFromScene(m_pressScenePosition);
     const QRectF rect = item->rect();
-    const qreal threshold = 18.0 / qMax<qreal>(0.1, transform().m11());
+    const qreal viewScale = qMax<qreal>(0.05,
+        std::hypot(transform().m11(), transform().m12()));
+    const qreal threshold = 18.0 / viewScale;
     m_resizeEdges = 0;
     if (qAbs(local.x() - rect.left()) <= threshold) m_resizeEdges |= EdgeLeft;
     if (qAbs(local.x() - rect.right()) <= threshold) m_resizeEdges |= EdgeRight;
     if (qAbs(local.y() - rect.top()) <= threshold) m_resizeEdges |= EdgeTop;
     if (qAbs(local.y() - rect.bottom()) <= threshold) m_resizeEdges |= EdgeBottom;
-    const QPointF rotatePoint(rect.center().x(), rect.top() - 26);
-    if (QLineF(local, rotatePoint).length() <= threshold) m_interaction = Interaction::Rotate;
+    const QPointF rotatePoint(rect.center().x(), rect.top() - 28.0 / viewScale);
+    // At reduced zoom the screen-sized hit radius grows in scene coordinates.
+    // Give the top-center resize handle priority while the pointer is still
+    // on the edge; otherwise it is easy to accidentally grab the rotate
+    // affordance when trying to expand a layer upward.
+    const bool topResizeHandle = (m_resizeEdges & EdgeTop) &&
+        qAbs(local.x() - rect.center().x()) <= threshold;
+    const bool rotateHandle = !topResizeHandle &&
+        QLineF(local, rotatePoint).length() <= threshold &&
+        local.y() < rect.top() - threshold * 0.75;
+    if (rotateHandle) m_interaction = Interaction::Rotate;
     else if (m_resizeEdges && event->modifiers().testFlag(Qt::AltModifier)) m_interaction = Interaction::Crop;
     else if (m_resizeEdges) m_interaction = Interaction::Resize;
     else m_interaction = Interaction::Move;

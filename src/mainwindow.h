@@ -73,6 +73,11 @@ private:
     void refreshLayerList();
     void refreshLayerInspector();
     void updateCanvasHint();
+    void showCanvasContextMenu(const QString &layerId, const QPoint &globalPosition);
+    void showLayerContextMenu(const QString &layerId, const QPoint &globalPosition);
+    void showLayerListContextMenu(const QPoint &position);
+    void showSourceListContextMenu(const QPoint &position);
+    void showCameraMonitorContextMenu(const QPoint &globalPosition);
     void refreshProjectList();
     bool openProjectDirectory(const QString &directory);
     void toggleRecording();

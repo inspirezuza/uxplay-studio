@@ -7,15 +7,18 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
+#include <QMenu>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSplitter>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QtTest>
@@ -266,6 +269,86 @@ private slots:
         QTest::mouseClick(fitCanvas, Qt::LeftButton);
         QCOMPARE(canvas->zoomPercent(), 100);
         QCOMPARE(zoomLabel->text(), QStringLiteral("100%"));
+    }
+
+    void cameraMonitorStaysHiddenInEditModeWhenFramesArrive() {
+        MainWindow window(nullptr, false);
+        window.show();
+        QTRY_VERIFY(window.isVisible());
+
+        auto *edit = window.findChild<QPushButton *>(QStringLiteral("segmentedButton"));
+        auto *live = window.findChildren<QPushButton *>().value(0);
+        for (QPushButton *button : window.findChildren<QPushButton *>()) {
+            if (button->text() == QStringLiteral("Edit layout")) edit = button;
+            if (button->text() == QStringLiteral("Live")) live = button;
+        }
+        auto *selfView = window.findChild<CameraSelfView *>(QStringLiteral("cameraSelfView"));
+        QVERIFY(edit);
+        QVERIFY(live);
+        QVERIFY(selfView);
+
+        QTest::mouseClick(edit, Qt::LeftButton);
+        selfView->setActive(true);
+        selfView->setFrame(QImage(320, 180, QImage::Format_ARGB32));
+        QCoreApplication::processEvents();
+        QVERIFY(selfView->isActive());
+        QVERIFY(!selfView->isVisible());
+
+        QTest::mouseClick(live, Qt::LeftButton);
+        selfView->setFrame(QImage(320, 180, QImage::Format_ARGB32));
+        QCoreApplication::processEvents();
+        QVERIFY(selfView->isVisible());
+    }
+
+    void contextMenusAreAvailableAcrossCanvasAndLists() {
+        MainWindow window(nullptr, false);
+        window.resize(1440, 880);
+        window.show();
+        QTRY_VERIFY(window.isVisible());
+
+        QPushButton *edit = nullptr;
+        for (QPushButton *button : window.findChildren<QPushButton *>())
+            if (button->text() == QStringLiteral("Edit layout")) edit = button;
+        QVERIFY(edit);
+        QTest::mouseClick(edit, Qt::LeftButton);
+        QCoreApplication::processEvents();
+
+        auto *canvas = window.findChild<SceneCanvas *>(QStringLiteral("sceneCanvas"));
+        auto *layers = window.findChild<QListWidget *>(QStringLiteral("layerList"));
+        auto *sources = window.findChild<QListWidget *>(QStringLiteral("sourceList"));
+        QVERIFY(canvas);
+        QVERIFY(layers);
+        QVERIFY(sources);
+
+        const auto openAndClose = [&](QWidget *target, const QString &menuName, const QPoint &local) {
+            bool seen = false;
+            QTimer::singleShot(0, [&seen, menuName]() {
+                auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+                if (menu && menu->objectName() == menuName) {
+                    seen = true;
+                    menu->close();
+                }
+            });
+            const QPoint global = target->mapToGlobal(local);
+            QContextMenuEvent event(QContextMenuEvent::Mouse, local, global);
+            QCoreApplication::sendEvent(target, &event);
+            QVERIFY2(seen, qPrintable(QStringLiteral("Context menu did not open: %1").arg(menuName)));
+        };
+
+        openAndClose(canvas->viewport(), QStringLiteral("layerContextMenu"),
+                     canvas->viewport()->rect().center());
+        openAndClose(canvas->viewport(), QStringLiteral("canvasContextMenu"), QPoint(4, 4));
+        openAndClose(layers->viewport(), QStringLiteral("layerContextMenu"),
+                     layers->visualItemRect(layers->item(0)).center());
+        openAndClose(sources->viewport(), QStringLiteral("sourceContextMenu"),
+                     sources->visualItemRect(sources->item(0)).center());
+
+        auto *selfView = window.findChild<CameraSelfView *>(QStringLiteral("cameraSelfView"));
+        QVERIFY(selfView);
+        selfView->setActive(true);
+        selfView->setFrame(QImage(320, 180, QImage::Format_ARGB32));
+        QCoreApplication::processEvents();
+        openAndClose(selfView, QStringLiteral("cameraMonitorContextMenu"), selfView->rect().center());
     }
 
     void inspectorReflectsSelectedLayerOpacityAndMask() {
