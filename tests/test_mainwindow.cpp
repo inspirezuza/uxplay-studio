@@ -6,6 +6,7 @@
 #include "uxplay_api.h"
 
 #include <QApplication>
+#include <QComboBox>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QHBoxLayout>
@@ -203,6 +204,49 @@ private slots:
         xField->setValue(120.0);
         QCOMPARE(canvas->document()->layer(SceneFormat::Wide, layerId)->transform.frame.x(), 120.0);
         QVERIFY(canvas->undoStack()->canUndo());
+    }
+
+    void inspectorReflectsSelectedLayerOpacityAndMask() {
+        MainWindow window(nullptr, false);
+        window.show();
+        QTRY_VERIFY(window.isVisible());
+
+        QPushButton *edit = nullptr;
+        for (QPushButton *button : window.findChildren<QPushButton *>())
+            if (button->text() == QStringLiteral("Edit layout")) edit = button;
+        QVERIFY(edit);
+        QTest::mouseClick(edit, Qt::LeftButton);
+        QCoreApplication::processEvents();
+
+        auto *layers = window.findChild<QListWidget *>(QStringLiteral("layerList"));
+        auto *canvas = window.findChild<SceneCanvas *>(QStringLiteral("sceneCanvas"));
+        QVERIFY(layers);
+        QVERIFY(canvas);
+        QVERIFY(layers->count() > 0);
+
+        const QString layerId = layers->item(0)->data(Qt::UserRole).toString();
+        const SceneLayer *layer = canvas->document()->layer(SceneFormat::Wide, layerId);
+        QVERIFY(layer);
+        SceneTransform transform = layer->transform;
+        transform.opacity = 0.75;
+        transform.mask = SceneMask::Circle;
+        canvas->document()->setTransform(SceneFormat::Wide, layerId, transform);
+        canvas->refreshFromDocument();
+
+        QComboBox *opacity = nullptr;
+        QComboBox *mask = nullptr;
+        for (QComboBox *combo : window.findChildren<QComboBox *>()) {
+            if (combo->accessibleName() == QStringLiteral("layerOpacity")) opacity = combo;
+            if (combo->accessibleName() == QStringLiteral("layerMask")) mask = combo;
+        }
+        QVERIFY(opacity);
+        QVERIFY(mask);
+
+        layers->setCurrentRow(0);
+        QCoreApplication::processEvents();
+
+        QCOMPARE(opacity->currentData().toDouble(), 0.75);
+        QCOMPARE(mask->currentData().toInt(), static_cast<int>(SceneMask::Circle));
     }
 
     void deleteButtonAndShortcutsRemoveOnlyUnlockedLayers() {

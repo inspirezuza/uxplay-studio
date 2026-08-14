@@ -57,18 +57,28 @@ if (-not [StringComparer]::OrdinalIgnoreCase.Equals($resolvedInstallRoot, $expec
     throw "Refusing to install outside the per-user UxPlay Studio directory: $resolvedInstallRoot"
 }
 
-# Never overwrite a running executable. A recording session must be closed by
-# the user before a new package can replace the installed runtime.
+# Clear every legacy UxPlay process before replacing the install. The app uses
+# one global mutex, so an old developer-path process can otherwise intercept a
+# Start Menu launch and bring its stale UI back to the foreground.
 $running = Get-Process -Name "uxplay-studio" -ErrorAction SilentlyContinue |
-    Where-Object {
-        try { [StringComparer]::OrdinalIgnoreCase.Equals($_.Path, $resolvedInstallRoot + "\uxplay-studio.exe") }
-        catch { $false }
-    }
+    Where-Object { $_.Id -ne $PID }
 foreach ($process in @($running)) {
+    $processPath = ""
+    try { $processPath = $process.Path } catch {}
+    $isCurrentInstall = [StringComparer]::OrdinalIgnoreCase.Equals(
+        $processPath,
+        $resolvedInstallRoot + "\uxplay-studio.exe"
+    )
     $process.CloseMainWindow() | Out-Null
-    if (-not $process.WaitForExit(10000)) {
-        throw "UxPlay Studio is still running. Close it before installing the latest build."
+    if ($process.WaitForExit(10000)) { continue }
+    if ($isCurrentInstall) {
+        throw "UxPlay Studio is still running. Stop recording and close it before installing the latest build."
     }
+    # A legacy developer build has no reliable recording-state contract. It is
+    # explicitly outside the managed install, so force-close only that stale
+    # process to release the single-instance mutex and leave one clean app.
+    Stop-Process -Id $process.Id -Force -ErrorAction Stop
+    $process.WaitForExit(5000) | Out-Null
 }
 
 if (Test-Path -LiteralPath $resolvedInstallRoot) {
