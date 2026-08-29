@@ -28,12 +28,14 @@ signals:
     void engineStarted();
     void engineExited(int exitCode);
     void receiverEvent(const ReceiverEvent &event);
+    void videoFrameDecoded();
 
 protected:
     void run() override;
 
 private:
     static void eventCallback(const struct uxplay_event *event, void *context);
+    static void frameCallback(void *context);
 
     QStringList m_args;
     quintptr m_videoWindow = 0;

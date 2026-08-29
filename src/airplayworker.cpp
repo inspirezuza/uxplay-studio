@@ -36,8 +36,10 @@ void AirPlayWorker::run() {
 
     uxplay_set_video_window(static_cast<uintptr_t>(m_videoWindow));
     uxplay_set_event_callback(&AirPlayWorker::eventCallback, this);
+    uxplay_set_frame_callback(&AirPlayWorker::frameCallback, this);
     emit engineStarted();
     const int exitCode = start_uxplay(static_cast<int>(argv.size()), argv.data());
+    uxplay_set_frame_callback(nullptr, nullptr);
     uxplay_set_event_callback(nullptr, nullptr);
     emit engineExited(exitCode);
 }
@@ -61,4 +63,11 @@ void AirPlayWorker::eventCallback(const uxplay_event *event, void *context) {
     translated.width = event->width;
     translated.height = event->height;
     emit worker->receiverEvent(translated);
+}
+
+void AirPlayWorker::frameCallback(void *context) {
+    if (!context) {
+        return;
+    }
+    emit static_cast<AirPlayWorker *>(context)->videoFrameDecoded();
 }

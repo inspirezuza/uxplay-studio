@@ -27,11 +27,14 @@ typedef struct uxplay_event {
 } uxplay_event;
 
 typedef void (*uxplay_event_callback)(const uxplay_event *event, void *context);
+typedef void (*uxplay_frame_callback)(void *context);
 
 int start_uxplay(int argc, char *argv[]);
 void stop_uxplay();
 void uxplay_set_video_window(uintptr_t window_handle);
 void uxplay_set_event_callback(uxplay_event_callback callback, void *context);
+void uxplay_set_frame_callback(uxplay_frame_callback callback, void *context);
+int uxplay_recover_video_window(uintptr_t window_handle);
 
 #ifdef __cplusplus
 }

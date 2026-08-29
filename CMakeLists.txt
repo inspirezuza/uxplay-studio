@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(UxPlayStudio VERSION 1.1.1 LANGUAGES C CXX)
+project(UxPlayStudio VERSION 1.1.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,6 +16,7 @@ set(UXPLAY_STUDIO_CORE_SOURCES
     src/appstate.cpp
     src/receiverconfig.cpp
     src/videosurface.cpp
+    src/streamhealth.cpp
 )
 
 add_executable(uxplay-studio WIN32
@@ -43,6 +44,9 @@ target_include_directories(uxplay-studio PRIVATE
 target_compile_definitions(uxplay-studio PRIVATE
     UXPLAY_STUDIO_VERSION="${PROJECT_VERSION}"
 )
+if(WIN32)
+    target_link_libraries(uxplay-studio PRIVATE Wtsapi32)
+endif()
 
 enable_testing()
 
@@ -60,6 +64,11 @@ add_executable(test-videosurface tests/test_videosurface.cpp src/videosurface.cp
 target_link_libraries(test-videosurface PRIVATE Qt6::Core Qt6::Widgets Qt6::Test)
 target_include_directories(test-videosurface PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME videosurface COMMAND test-videosurface)
+
+add_executable(test-streamhealth tests/test_streamhealth.cpp src/streamhealth.cpp)
+target_link_libraries(test-streamhealth PRIVATE Qt6::Core Qt6::Test)
+target_include_directories(test-streamhealth PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME streamhealth COMMAND test-streamhealth)
 
 add_executable(test-mainwindow
     tests/test_mainwindow.cpp
@@ -85,4 +94,7 @@ target_include_directories(test-mainwindow PRIVATE
 target_compile_definitions(test-mainwindow PRIVATE
     UXPLAY_STUDIO_VERSION="${PROJECT_VERSION}"
 )
+if(WIN32)
+    target_link_libraries(test-mainwindow PRIVATE Wtsapi32)
+endif()
 add_test(NAME mainwindow COMMAND test-mainwindow)

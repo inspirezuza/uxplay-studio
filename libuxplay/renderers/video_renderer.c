@@ -47,6 +47,10 @@ static bool use_x11 = false;
 #endif
 static bool logger_debug = false;
 static uintptr_t embedded_window_handle = 0;
+static video_renderer_frame_callback host_frame_callback = NULL;
+static void *host_frame_context = NULL;
+static gint64 last_frame_callback_us = 0;
+G_LOCK_DEFINE_STATIC(host_frame_callback_lock);
 static gint64 hls_requested_start_position = 0;
 static gint64 hls_seek_start = 0;
 static gint64 hls_seek_end = 0;
@@ -79,7 +83,7 @@ typedef enum {
 #define NCODECS  3   /* renderers for h264,h265, and jpeg images */
 
 struct video_renderer_s {
-    GstElement *appsrc, *pipeline, *textsrc;
+    GstElement *appsrc, *pipeline, *textsrc, *video_sink, *frame_heartbeat;
     GstBus *bus;
     const char *codec;
     bool autovideo;
@@ -107,6 +111,35 @@ void video_renderer_set_window_handle(uintptr_t window_handle) {
     embedded_window_handle = window_handle;
 }
 
+void video_renderer_set_frame_callback(video_renderer_frame_callback callback, void *context) {
+    G_LOCK(host_frame_callback_lock);
+    host_frame_callback = callback;
+    host_frame_context = context;
+    last_frame_callback_us = 0;
+    G_UNLOCK(host_frame_callback_lock);
+}
+
+static void handle_frame_handoff(GstElement *identity, GstBuffer *buffer, gpointer user_data) {
+    (void) identity;
+    (void) buffer;
+    (void) user_data;
+
+    video_renderer_frame_callback callback = NULL;
+    void *context = NULL;
+    const gint64 now_us = g_get_monotonic_time();
+    G_LOCK(host_frame_callback_lock);
+    if (host_frame_callback &&
+        (last_frame_callback_us == 0 || now_us - last_frame_callback_us >= 250000)) {
+        last_frame_callback_us = now_us;
+        callback = host_frame_callback;
+        context = host_frame_context;
+    }
+    G_UNLOCK(host_frame_callback_lock);
+    if (callback) {
+        callback(context);
+    }
+}
+
 static bool attach_embedded_window(GstElement *video_sink) {
     if (!embedded_window_handle) {
         return true;
@@ -124,6 +157,38 @@ static bool attach_embedded_window(GstElement *video_sink) {
     gst_video_overlay_set_window_handle(GST_VIDEO_OVERLAY(video_sink),
                                         (guintptr) embedded_window_handle);
     logger_log(logger, LOGGER_INFO, "Video renderer attached to embedded host window");
+    return true;
+}
+
+bool video_renderer_recover_window(uintptr_t window_handle) {
+    embedded_window_handle = window_handle;
+    if (!renderer || !renderer->pipeline || !renderer->video_sink ||
+        !embedded_window_handle) {
+        return false;
+    }
+
+    GstElement *video_sink = GST_ELEMENT(gst_object_ref(renderer->video_sink));
+    gst_element_set_locked_state(video_sink, TRUE);
+    GstStateChangeReturn reset_result = gst_element_set_state(video_sink, GST_STATE_NULL);
+    if (reset_result != GST_STATE_CHANGE_FAILURE) {
+        gst_element_get_state(video_sink, NULL, NULL, 500 * GST_MSECOND);
+    }
+
+    const bool attached = attach_embedded_window(video_sink);
+    gst_element_set_locked_state(video_sink, FALSE);
+    const gboolean synced = attached ? gst_element_sync_state_with_parent(video_sink) : FALSE;
+    if (attached && GST_IS_VIDEO_OVERLAY(video_sink)) {
+        gst_video_overlay_expose(GST_VIDEO_OVERLAY(video_sink));
+    }
+    gst_object_unref(video_sink);
+
+    if (!attached || !synced || reset_result == GST_STATE_CHANGE_FAILURE) {
+        logger_log(logger, LOGGER_WARNING,
+                   "Could not restore the embedded video output after a session resume");
+        return false;
+    }
+    logger_log(logger, LOGGER_INFO,
+               "Embedded video output was reattached after a session resume");
     return true;
 }
 
@@ -342,6 +407,8 @@ bool video_renderer_init(logger_t *render_logger, const char *server_name, video
         renderer_type[i]->bus = NULL;
         renderer_type[i]->appsrc = NULL;
         renderer_type[i]->textsrc = NULL;
+        renderer_type[i]->video_sink = NULL;
+        renderer_type[i]->frame_heartbeat = NULL;
         renderer_type[i]->uri = NULL;
         renderer_type[i]->eos = FALSE;
         if (hls_video) {
@@ -372,6 +439,7 @@ bool video_renderer_init(logger_t *render_logger, const char *server_name, video
                 } else {
                     logger_log(logger, LOGGER_DEBUG, "video_renderer_init: create playbin_videosink at %p", playbin_videosink);
                     g_object_set(G_OBJECT (renderer_type[i]->pipeline), "video-sink", playbin_videosink, NULL);
+                    renderer_type[i]->video_sink = playbin_videosink;
                 }
             }
             gint flags = 0;
@@ -437,6 +505,9 @@ bool video_renderer_init(logger_t *render_logger, const char *server_name, video
                 }
                 if (jpeg_pipeline) {
                     g_string_append(launch, " imagefreeze allow-replace=TRUE ! textoverlay name=metadata_overlay ! ");
+                }
+                if (!jpeg_pipeline) {
+                    g_string_append(launch, "identity name=studio_frame_heartbeat signal-handoffs=true silent=true ! ");
                 }
                 g_string_append(launch, videosink);
                 g_string_append(launch, " name=");
@@ -507,7 +578,7 @@ bool video_renderer_init(logger_t *render_logger, const char *server_name, video
                     return false;
                 }
                 if (embedded_sink) {
-                    gst_object_unref(embedded_sink);
+                    renderer_type[i]->video_sink = embedded_sink;
                 }
                 g_string_free(sink_name, TRUE);
             }
@@ -522,6 +593,14 @@ bool video_renderer_init(logger_t *render_logger, const char *server_name, video
             gst_pipeline_use_clock(GST_PIPELINE_CAST(renderer_type[i]->pipeline), clock);
             renderer_type[i]->appsrc = gst_bin_get_by_name (GST_BIN (renderer_type[i]->pipeline), "video_source");
             g_assert(renderer_type[i]->appsrc);
+            if (!jpeg_pipeline) {
+                renderer_type[i]->frame_heartbeat = gst_bin_get_by_name(
+                    GST_BIN(renderer_type[i]->pipeline), "studio_frame_heartbeat");
+                if (renderer_type[i]->frame_heartbeat) {
+                    g_signal_connect(renderer_type[i]->frame_heartbeat, "handoff",
+                                     G_CALLBACK(handle_frame_handoff), NULL);
+                }
+            }
             g_object_set(renderer_type[i]->appsrc, "caps", caps, "stream-type", 0, "is-live", TRUE, "format", GST_FORMAT_TIME, NULL);
             g_string_free(launch, TRUE);
             gst_caps_unref(caps);
@@ -844,7 +923,15 @@ static void video_renderer_destroy_instance(video_renderer_t *renderer) {
         if (renderer->textsrc) {
             gst_object_unref (renderer->textsrc);
             renderer->textsrc = NULL;
-        }	
+        }
+        if (renderer->frame_heartbeat) {
+            gst_object_unref(renderer->frame_heartbeat);
+            renderer->frame_heartbeat = NULL;
+        }
+        if (renderer->video_sink) {
+            gst_object_unref(renderer->video_sink);
+            renderer->video_sink = NULL;
+        }
         if (renderer->bus) {
             gst_object_unref(renderer->bus);
             renderer->bus = NULL;

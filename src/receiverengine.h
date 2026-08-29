@@ -19,10 +19,12 @@ public:
     void start(const ReceiverConfig &config, quintptr videoWindow, const QString &bleStatusPath);
     void stop();
     void restart(const ReceiverConfig &config, quintptr videoWindow, const QString &bleStatusPath);
+    bool recoverVideoOutput();
 
 signals:
     void stateChanged(ReceiverState state);
     void eventReceived(const ReceiverEvent &event);
+    void videoFrameDecoded();
     void recoveryScheduled(int delayMs);
 
 private:

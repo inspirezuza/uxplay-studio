@@ -28,6 +28,7 @@ private slots:
         auto *playerLayout = window.findChild<QVBoxLayout *>(QStringLiteral("playerLayout"));
         auto *rendererBadge = window.findChild<QLabel *>(QStringLiteral("miniBadge"));
         auto *diagnostics = window.findChild<QPlainTextEdit *>(QStringLiteral("diagnosticsText"));
+        auto *streamHealth = window.findChild<QLabel *>(QStringLiteral("streamHealth"));
 
         QVERIFY(button);
         QVERIFY(sidebar);
@@ -39,6 +40,8 @@ private slots:
         QVERIFY(playerLayout);
         QVERIFY(rendererBadge);
         QVERIFY(diagnostics);
+        QVERIFY(streamHealth);
+        QVERIFY(!streamHealth->text().isEmpty());
         QCOMPARE(rendererBadge->text(), QStringLiteral("D3D11 · EMBEDDED"));
         QVERIFY(diagnostics->toPlainText().contains(
             QStringLiteral("Decoder: Automatic; hardware preferred with software fallback")));

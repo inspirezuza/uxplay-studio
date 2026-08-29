@@ -231,6 +231,15 @@ extern "C" void uxplay_set_video_window(uintptr_t window_handle) {
     video_renderer_set_window_handle(window_handle);
 }
 
+extern "C" void uxplay_set_frame_callback(uxplay_frame_callback callback,
+                                            void *context) {
+    video_renderer_set_frame_callback(callback, context);
+}
+
+extern "C" int uxplay_recover_video_window(uintptr_t window_handle) {
+    return video_renderer_recover_window(window_handle) ? 1 : 0;
+}
+
 extern "C" void uxplay_set_event_callback(uxplay_event_callback callback,
                                             void *context) {
     host_event_callback = callback;

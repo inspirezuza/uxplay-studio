@@ -65,6 +65,13 @@ void ReceiverEngine::restart(const ReceiverConfig &config, quintptr videoWindow,
     m_worker->stopAirplay();
 }
 
+bool ReceiverEngine::recoverVideoOutput() {
+    if (state() != ReceiverState::Mirroring || !isRunning() || !m_videoWindow) {
+        return false;
+    }
+    return uxplay_recover_video_window(static_cast<uintptr_t>(m_videoWindow)) != 0;
+}
+
 void ReceiverEngine::launchWorker() {
     if (isRunning() || !m_videoWindow) {
         return;
@@ -75,6 +82,8 @@ void ReceiverEngine::launchWorker() {
     worker->configure(m_config.uxplayArguments(m_bleStatusPath), m_videoWindow);
     connect(worker, &AirPlayWorker::receiverEvent, this, &ReceiverEngine::handleEvent,
             Qt::QueuedConnection);
+    connect(worker, &AirPlayWorker::videoFrameDecoded,
+            this, &ReceiverEngine::videoFrameDecoded, Qt::QueuedConnection);
     connect(worker, &AirPlayWorker::engineExited, this, &ReceiverEngine::handleWorkerExit,
             Qt::QueuedConnection);
     connect(worker, &QThread::finished, this, &ReceiverEngine::handleWorkerFinished,

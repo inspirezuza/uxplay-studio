@@ -47,10 +47,13 @@ typedef enum videoflip_e {
 } videoflip_t;
 
 typedef struct video_renderer_s video_renderer_t;
+typedef void (*video_renderer_frame_callback)(void *context);
 
 /* Attach all video sinks to a window owned by the host application. A value
  * of zero restores the normal standalone-window behavior. */
 void video_renderer_set_window_handle(uintptr_t window_handle);
+void video_renderer_set_frame_callback(video_renderer_frame_callback callback, void *context);
+bool video_renderer_recover_window(uintptr_t window_handle);
 
 bool video_renderer_init (logger_t *logger, const char *server_name, videoflip_t videoflip[2], const char *parser, const char *rtp_pipeline,
                           const char *decoder, const char *converter, const char *videosink, const char *videosink_options,

@@ -4,6 +4,7 @@
 #include "mdns_responder.hpp"
 #include "networkdiagnostics.h"
 #include "receiverengine.h"
+#include "streamhealth.h"
 #include "videosurface.h"
 #include "uxplay_api.h"
 
@@ -41,6 +42,7 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <wtsapi32.h>
 #endif
 
 namespace {
@@ -85,6 +87,7 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart)
     m_config = SettingsStore::load();
     m_config.autostart = autostartEnabled();
     m_engine = new ReceiverEngine(this);
+    m_healthClock.start();
 
     setupUi();
     setupTray();
@@ -94,6 +97,8 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart)
             this, &MainWindow::handleStateChanged);
     connect(m_engine, &ReceiverEngine::eventReceived,
             this, &MainWindow::handleReceiverEvent);
+    connect(m_engine, &ReceiverEngine::videoFrameDecoded,
+            this, &MainWindow::handleVideoFrameDecoded);
     connect(m_engine, &ReceiverEngine::recoveryScheduled, this, [this](int delayMs) {
         appendActivity(QStringLiteral("Recovery"),
                        QStringLiteral("Receiver will retry in %1 second(s).")
@@ -104,6 +109,17 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart)
     connect(timer, &QTimer::timeout, this, &MainWindow::updateSessionTimer);
     timer->start(1000);
 
+#ifdef Q_OS_WIN
+    m_wtsNotificationsRegistered =
+        WTSRegisterSessionNotification(reinterpret_cast<HWND>(winId()),
+                                       NOTIFY_FOR_THIS_SESSION) != FALSE;
+    if (!m_wtsNotificationsRegistered) {
+        appendActivity(
+            QStringLiteral("Recovery"),
+            QStringLiteral("Windows lock notifications are unavailable; use Reconnect now if video goes black."));
+    }
+#endif
+
     handleStateChanged(ReceiverState::Stopped);
     refreshDiagnostics();
     if (m_autoStart) {
@@ -113,6 +129,12 @@ MainWindow::MainWindow(QWidget *parent, bool autoStart)
 
 MainWindow::~MainWindow() {
     m_quitting = true;
+#ifdef Q_OS_WIN
+    if (m_wtsNotificationsRegistered) {
+        WTSUnRegisterSessionNotification(reinterpret_cast<HWND>(winId()));
+        m_wtsNotificationsRegistered = false;
+    }
+#endif
     if (m_cursorOverride) {
         QApplication::restoreOverrideCursor();
         m_cursorOverride = false;
@@ -298,6 +320,10 @@ QWidget *MainWindow::createPlayerPage() {
     sessionLayout->addWidget(m_resolution);
     m_duration = mutedLabel(QStringLiteral("00:00"), m_sessionPanel);
     sessionLayout->addWidget(m_duration);
+    m_streamHealth = mutedLabel(QStringLiteral("Waiting for video"), m_sessionPanel);
+    m_streamHealth->setObjectName(QStringLiteral("streamHealth"));
+    m_streamHealth->setWordWrap(true);
+    sessionLayout->addWidget(m_streamHealth);
     sessionLayout->addSpacing(8);
 
     sessionLayout->addWidget(mutedLabel(QStringLiteral("NETWORK"), m_sessionPanel));
@@ -307,6 +333,13 @@ QWidget *MainWindow::createPlayerPage() {
     m_securitySummary = mutedLabel({}, m_sessionPanel);
     sessionLayout->addWidget(m_securitySummary);
     sessionLayout->addStretch();
+
+    m_reconnectButton = new QPushButton(QStringLiteral("Reconnect now"), m_sessionPanel);
+    m_reconnectButton->setObjectName(QStringLiteral("secondaryButton"));
+    m_reconnectButton->setToolTip(
+        QStringLiteral("Restart the AirPlay receiver if the picture does not return."));
+    connect(m_reconnectButton, &QPushButton::clicked, this, &MainWindow::restartReceiver);
+    sessionLayout->addWidget(m_reconnectButton);
 
     auto *openSettings = new QPushButton(QStringLiteral("Open settings"), m_sessionPanel);
     openSettings->setObjectName(QStringLiteral("secondaryButton"));
@@ -553,6 +586,7 @@ void MainWindow::handleStateChanged(ReceiverState state) {
         "QLabel { color: %1; background: %1; background-color: rgba(255,255,255,0.06);"
         " border: 1px solid %1; border-radius: 12px; padding: 5px 10px; }").arg(color));
     const bool running = state != ReceiverState::Stopped;
+    m_reconnectButton->setEnabled(running);
     m_receiverToggle->setText(running ? QStringLiteral("Stop receiver")
                                       : QStringLiteral("Start receiver"));
     if (m_trayReceiverAction) {
@@ -561,6 +595,8 @@ void MainWindow::handleStateChanged(ReceiverState state) {
     }
 
     m_sessionState->setText(receiverStateLabel(state));
+    m_streamHealthMonitor.setMirroring(state == ReceiverState::Mirroring,
+                                      m_healthClock.elapsed());
     if (state != ReceiverState::Mirroring) {
         m_videoSurface->setStreaming(false);
     }
@@ -584,7 +620,10 @@ void MainWindow::handleStateChanged(ReceiverState state) {
                                            QStringLiteral("The stream will appear here automatically."));
         break;
     case ReceiverState::Mirroring:
-        m_videoSurface->setStreaming(true);
+        m_videoSurface->setStreaming(false);
+        m_videoSurface->setPlaceholderText(
+            QStringLiteral("Screen sharing connected"),
+            QStringLiteral("Waiting for the first decoded video frame…"));
         if (!m_sessionElapsed.isValid()) m_sessionElapsed.start();
         break;
     case ReceiverState::Error:
@@ -592,6 +631,7 @@ void MainWindow::handleStateChanged(ReceiverState state) {
                                            QStringLiteral("Open Diagnostics or restart the receiver."));
         break;
     }
+    updateStreamHealth();
 }
 
 void MainWindow::handleReceiverEvent(const ReceiverEvent &event) {
@@ -630,10 +670,170 @@ void MainWindow::handleReceiverEvent(const ReceiverEvent &event) {
                                                       : event.message);
 }
 
+void MainWindow::handleVideoFrameDecoded() {
+    if (m_engine->state() != ReceiverState::Mirroring) {
+        return;
+    }
+    const auto before = m_streamHealthMonitor.health(m_healthClock.elapsed());
+    m_streamHealthMonitor.frameReceived(m_healthClock.elapsed());
+    const auto after = m_streamHealthMonitor.health(m_healthClock.elapsed());
+    if (after == StreamHealthMonitor::Health::Live &&
+        before != StreamHealthMonitor::Health::Live) {
+        m_videoSurface->setStreaming(true);
+        if (before == StreamHealthMonitor::Health::Restoring) {
+            appendActivity(QStringLiteral("Recovery"),
+                           QStringLiteral("Video frames resumed after Windows was unlocked."));
+        }
+    }
+    updateStreamHealth();
+}
+
+void MainWindow::handleSessionLocked() {
+    if (m_engine->state() != ReceiverState::Mirroring ||
+        m_streamHealthMonitor.health(m_healthClock.elapsed()) ==
+            StreamHealthMonitor::Health::Locked) {
+        return;
+    }
+    m_streamHealthMonitor.sessionLocked(m_healthClock.elapsed());
+    m_videoSurface->setStreaming(false);
+    m_videoSurface->setPlaceholderText(
+        QStringLiteral("PC session locked"),
+        QStringLiteral("Video output is paused. UxPlay Studio will restore it after unlock."));
+    appendActivity(QStringLiteral("Recovery"),
+                   QStringLiteral("Windows was locked; video output is paused."));
+    updateStreamHealth();
+}
+
+void MainWindow::handleSessionResumed() {
+    const auto action = m_streamHealthMonitor.sessionResumed(m_healthClock.elapsed());
+    if (action == StreamHealthMonitor::Action::None) {
+        return;
+    }
+    m_videoSurface->setStreaming(false);
+    m_videoSurface->setPlaceholderText(
+        QStringLiteral("Restoring video output…"),
+        QStringLiteral("The AirPlay session is still connected. Reattaching the renderer now."));
+    appendActivity(QStringLiteral("Recovery"),
+                   QStringLiteral("Windows resumed; restoring the embedded video output."));
+    updateStreamHealth();
+    performRecoveryAction(action);
+}
+
+void MainWindow::performRecoveryAction(StreamHealthMonitor::Action action) {
+    if (action == StreamHealthMonitor::Action::RefreshRenderer) {
+        if (!m_engine->recoverVideoOutput()) {
+            m_streamHealthMonitor.rendererRefreshFailed();
+            appendActivity(QStringLiteral("Recovery"),
+                           QStringLiteral("Renderer refresh failed; restarting the receiver once."));
+            updateStreamHealth();
+            QTimer::singleShot(0, this, &MainWindow::restartReceiver);
+        }
+        return;
+    }
+    if (action == StreamHealthMonitor::Action::RestartReceiver) {
+        m_videoSurface->setStreaming(false);
+        m_videoSurface->setPlaceholderText(
+            QStringLiteral("Reconnecting the receiver…"),
+            QStringLiteral("Video did not resume after unlock. Restarting AirPlay once."));
+        appendActivity(QStringLiteral("Recovery"),
+                       QStringLiteral("No video frames returned after unlock; restarting the receiver once."));
+        updateStreamHealth();
+        restartReceiver();
+    }
+}
+
+void MainWindow::updateStreamHealth() {
+    if (!m_streamHealth) {
+        return;
+    }
+
+    QString text;
+    QString color = QStringLiteral("#8f9db5");
+    switch (m_streamHealthMonitor.health(m_healthClock.elapsed())) {
+    case StreamHealthMonitor::Health::Idle:
+        text = m_engine->state() == ReceiverState::Ready
+            ? QStringLiteral("Waiting for a device")
+            : QStringLiteral("Video stream inactive");
+        break;
+    case StreamHealthMonitor::Health::WaitingForFrames:
+        text = QStringLiteral("Connected · waiting for video frames…");
+        color = QStringLiteral("#f6c85f");
+        break;
+    case StreamHealthMonitor::Health::Live:
+        text = QStringLiteral("Video live · frames arriving");
+        color = QStringLiteral("#38d996");
+        break;
+    case StreamHealthMonitor::Health::Locked:
+        text = QStringLiteral("PC locked · video output paused");
+        color = QStringLiteral("#f6c85f");
+        break;
+    case StreamHealthMonitor::Health::Restoring:
+        text = QStringLiteral("Restoring video after unlock…");
+        color = QStringLiteral("#6c8cff");
+        break;
+    case StreamHealthMonitor::Health::Reconnecting:
+        text = QStringLiteral("Video did not recover · restarting receiver…");
+        color = QStringLiteral("#ff9f5a");
+        break;
+    case StreamHealthMonitor::Health::Stalled: {
+        const qint64 age = m_streamHealthMonitor.millisecondsSinceFrame(m_healthClock.elapsed());
+        text = QStringLiteral("No new frames for %1s · device may be paused")
+                   .arg(age < 0 ? 0 : age / 1000);
+        color = QStringLiteral("#f6c85f");
+        break;
+    }
+    }
+    m_streamHealth->setText(text);
+    m_streamHealth->setStyleSheet(QStringLiteral("color: %1;").arg(color));
+
+    if (m_engine->state() == ReceiverState::Mirroring) {
+        QString sessionText;
+        QString badgeText;
+        switch (m_streamHealthMonitor.health(m_healthClock.elapsed())) {
+        case StreamHealthMonitor::Health::WaitingForFrames:
+            sessionText = QStringLiteral("Starting video");
+            badgeText = QStringLiteral("Starting video");
+            break;
+        case StreamHealthMonitor::Health::Live:
+            sessionText = QStringLiteral("Screen sharing");
+            badgeText = QStringLiteral("Screen sharing");
+            break;
+        case StreamHealthMonitor::Health::Locked:
+            sessionText = QStringLiteral("Video paused while PC is locked");
+            badgeText = QStringLiteral("Video paused");
+            break;
+        case StreamHealthMonitor::Health::Restoring:
+            sessionText = QStringLiteral("Restoring video output");
+            badgeText = QStringLiteral("Restoring video");
+            break;
+        case StreamHealthMonitor::Health::Reconnecting:
+            sessionText = QStringLiteral("Reconnecting receiver");
+            badgeText = QStringLiteral("Reconnecting");
+            break;
+        case StreamHealthMonitor::Health::Stalled:
+            sessionText = QStringLiteral("Screen sharing paused");
+            badgeText = QStringLiteral("Video paused");
+            break;
+        case StreamHealthMonitor::Health::Idle:
+            break;
+        }
+        if (!sessionText.isEmpty()) {
+            m_sessionState->setText(sessionText);
+            m_statusBadge->setText(badgeText);
+            m_statusBadge->setStyleSheet(QStringLiteral(
+                "QLabel { color: %1; background: %1; background-color: rgba(255,255,255,0.06);"
+                " border: 1px solid %1; border-radius: 12px; padding: 5px 10px; }")
+                                             .arg(color));
+        }
+    }
+}
+
 void MainWindow::updateSessionTimer() {
     if (m_engine->state() == ReceiverState::Mirroring && m_sessionElapsed.isValid()) {
         m_duration->setText(formatDuration(m_sessionElapsed.elapsed() / 1000));
     }
+    performRecoveryAction(m_streamHealthMonitor.tick(m_healthClock.elapsed()));
+    updateStreamHealth();
 }
 
 void MainWindow::appendActivity(const QString &category, const QString &message) {
@@ -914,4 +1114,26 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
         return;
     }
     QMainWindow::keyPressEvent(event);
+}
+
+bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result) {
+#ifdef Q_OS_WIN
+    auto *nativeMessage = static_cast<MSG *>(message);
+    if (nativeMessage && nativeMessage->message == WM_WTSSESSION_CHANGE) {
+        if (nativeMessage->wParam == WTS_SESSION_LOCK) {
+            handleSessionLocked();
+        } else if (nativeMessage->wParam == WTS_SESSION_UNLOCK) {
+            handleSessionResumed();
+        }
+    } else if (nativeMessage && nativeMessage->message == WM_POWERBROADCAST &&
+               (nativeMessage->wParam == PBT_APMRESUMEAUTOMATIC ||
+                nativeMessage->wParam == PBT_APMRESUMESUSPEND)) {
+        handleSessionResumed();
+    }
+#else
+    Q_UNUSED(eventType)
+    Q_UNUSED(message)
+    Q_UNUSED(result)
+#endif
+    return QMainWindow::nativeEvent(eventType, message, result);
 }

@@ -2,6 +2,7 @@
 
 #include "appstate.h"
 #include "receiverconfig.h"
+#include "streamhealth.h"
 
 #include <QByteArray>
 #include <QElapsedTimer>
@@ -38,6 +39,7 @@ public:
 protected:
     void closeEvent(QCloseEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
 
 private:
     void setupUi();
@@ -55,6 +57,11 @@ private:
     void toggleReceiver();
     void handleStateChanged(ReceiverState state);
     void handleReceiverEvent(const ReceiverEvent &event);
+    void handleVideoFrameDecoded();
+    void handleSessionLocked();
+    void handleSessionResumed();
+    void performRecoveryAction(StreamHealthMonitor::Action action);
+    void updateStreamHealth();
     void updateSessionTimer();
     void appendActivity(const QString &category, const QString &message);
 
@@ -109,9 +116,11 @@ private:
     QLabel *m_deviceModel = nullptr;
     QLabel *m_resolution = nullptr;
     QLabel *m_duration = nullptr;
+    QLabel *m_streamHealth = nullptr;
     QLabel *m_networkAddress = nullptr;
     QLabel *m_securitySummary = nullptr;
     QPushButton *m_fullscreenButton = nullptr;
+    QPushButton *m_reconnectButton = nullptr;
 
     QTextEdit *m_activityLog = nullptr;
     QPlainTextEdit *m_diagnostics = nullptr;
@@ -128,4 +137,9 @@ private:
     QSystemTrayIcon *m_tray = nullptr;
     QAction *m_trayReceiverAction = nullptr;
     QElapsedTimer m_sessionElapsed;
+    QElapsedTimer m_healthClock;
+    StreamHealthMonitor m_streamHealthMonitor;
+#ifdef Q_OS_WIN
+    bool m_wtsNotificationsRegistered = false;
+#endif
 };

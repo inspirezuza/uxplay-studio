@@ -1,6 +1,7 @@
 # Core pipeline elements
 appsrc
 queue
+identity
 filesink
 fakesink
 typefind
