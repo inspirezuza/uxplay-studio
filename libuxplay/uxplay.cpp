@@ -2424,11 +2424,18 @@ extern "C" void mirror_video_running  (void *cls, bool is_running) {
 extern "C" void video_pause (void *cls) {
     if (use_video) {
         video_renderer_pause();
+        emit_host_event(UXPLAY_EVENT_VIDEO_PAUSED, NULL, NULL, NULL,
+                        "The AirPlay device paused its video stream");
     }
 }
 
 extern "C" void video_resume (void *cls) {
     if (use_video) {
+        const bool resynced = video_renderer_resync();
+        emit_host_event(UXPLAY_EVENT_VIDEO_RESUMING, NULL, NULL, NULL,
+                        resynced
+                            ? "Resynchronizing video after the AirPlay device resumed"
+                            : "Video resumed, but the decoder could not be reset cleanly");
         video_renderer_resume();
     }
 }

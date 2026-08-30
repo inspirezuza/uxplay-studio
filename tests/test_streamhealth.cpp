@@ -70,6 +70,35 @@ private slots:
         QCOMPARE(monitor.tick(202 + StreamHealthMonitor::UnlockRecoveryTimeoutMs),
                  StreamHealthMonitor::Action::None);
     }
+
+    void tracksIpadSleepAndCleanResume() {
+        StreamHealthMonitor monitor;
+        monitor.setMirroring(true, 0);
+        monitor.frameReceived(100);
+
+        monitor.devicePaused(200);
+        QCOMPARE(monitor.health(200), StreamHealthMonitor::Health::DevicePaused);
+        QCOMPARE(monitor.tick(200 + StreamHealthMonitor::UnlockRecoveryTimeoutMs * 2),
+                 StreamHealthMonitor::Action::None);
+
+        monitor.deviceResumed(300);
+        QCOMPARE(monitor.health(300), StreamHealthMonitor::Health::DeviceResuming);
+        monitor.frameReceived(400);
+        QCOMPARE(monitor.health(400), StreamHealthMonitor::Health::Live);
+    }
+
+    void restartsOnceIfIpadResumeNeverProducesAFrame() {
+        StreamHealthMonitor monitor;
+        monitor.setMirroring(true, 0);
+        monitor.frameReceived(100);
+        monitor.devicePaused(200);
+        monitor.deviceResumed(300);
+
+        const qint64 deadline = 300 + StreamHealthMonitor::UnlockRecoveryTimeoutMs;
+        QCOMPARE(monitor.tick(deadline), StreamHealthMonitor::Action::RestartReceiver);
+        QCOMPARE(monitor.health(deadline), StreamHealthMonitor::Health::Reconnecting);
+        QCOMPARE(monitor.tick(deadline + 10000), StreamHealthMonitor::Action::None);
+    }
 };
 
 QTEST_APPLESS_MAIN(StreamHealthTest)

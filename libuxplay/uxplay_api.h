@@ -13,7 +13,9 @@ typedef enum uxplay_event_type {
     UXPLAY_EVENT_STREAM_STOPPED = 3,
     UXPLAY_EVENT_PIN_REQUIRED = 4,
     UXPLAY_EVENT_WARNING = 5,
-    UXPLAY_EVENT_ERROR = 6
+    UXPLAY_EVENT_ERROR = 6,
+    UXPLAY_EVENT_VIDEO_PAUSED = 7,
+    UXPLAY_EVENT_VIDEO_RESUMING = 8
 } uxplay_event_type;
 
 typedef struct uxplay_event {

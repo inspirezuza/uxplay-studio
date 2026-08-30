@@ -111,6 +111,8 @@ void ReceiverEngine::handleEvent(const ReceiverEvent &event) {
     case UXPLAY_EVENT_ERROR:
         transitionTo(ReceiverState::Error);
         break;
+    case UXPLAY_EVENT_VIDEO_PAUSED:
+    case UXPLAY_EVENT_VIDEO_RESUMING:
     case UXPLAY_EVENT_WARNING:
         break;
     }

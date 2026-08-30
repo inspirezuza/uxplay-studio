@@ -35,6 +35,7 @@
 #include "logger.h"
 #include "byteutils.h"
 #include "mirror_buffer.h"
+#include "mirror_recovery.h"
 #include "stream.h"
 #include "utils.h"
 #include "plist/plist.h"
@@ -203,6 +204,7 @@ raop_rtp_mirror_thread(void *arg)
     const char h265[] = "h265";
     bool unsupported_codec = false;
     bool video_stream_suspended = false;
+    mirror_resume_gate_t resume_gate = {false};
     bool first_packet = true;
     
     while (1) {
@@ -391,8 +393,19 @@ raop_rtp_mirror_thread(void *arg)
             }
 
             switch (packet[4]) {
-            case  0x00:
+            case  0x00: {
                 // Normal video data (VCL NAL)
+
+                /* After an iPad display wakes, predictive frames can arrive before
+                 * a clean decoder reference exists. Never feed those frames into
+                 * GStreamer: retain the new SPS/PPS and wait for the first IDR. */
+                const bool resuming_on_keyframe = resume_gate.awaiting_keyframe;
+                if (!mirror_resume_gate_should_forward(&resume_gate, packet,
+                                                       sizeof(packet))) {
+                    logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG,
+                               "Dropping a predictive video frame while waiting for the post-resume keyframe");
+                    break;
+                }
 
                 // Conveniently, the video data is already stamped with the remote wall clock time,
                 // so no additional clock syncing needed. The only thing odd here is that the video
@@ -427,7 +440,8 @@ raop_rtp_mirror_thread(void *arg)
                  * that has not yet been sent.   This will trigger prepending it to the current NAL, and the prepend_sps_pps 
                  * flag will be set to false after it has been prepended.  */
 
-                if (prepend_sps_pps & (ntp_timestamp_raw != ntp_timestamp_nal)) {
+                if (prepend_sps_pps && !resuming_on_keyframe &&
+                    (ntp_timestamp_raw != ntp_timestamp_nal)) {
                         logger_log(raop_rtp_mirror->logger, LOGGER_DEBUG,
                                    "raop_rtp_mirror: prepended sps_pps timestamp does not match timestamp of "
                                    "video payload\n%llu\n%llu , discarding", ntp_timestamp_raw, ntp_timestamp_nal);
@@ -557,6 +571,7 @@ raop_rtp_mirror_thread(void *arg)
                 raop_rtp_mirror->callbacks.video_process(raop_rtp_mirror->callbacks.cls, raop_rtp_mirror->ntp, &video_data);
                 free(payload_out);
                 break;
+            }
             case 0x01:
                 /* 128-byte observed packet header structure 
                    bytes 0-15: length + timestamp
@@ -583,8 +598,10 @@ raop_rtp_mirror_thread(void *arg)
                 }
                 if (!video_stream_suspended && (packet[6] == 0x56 || packet[6] == 0x5e)) {
                     video_stream_suspended = true;
+                    mirror_resume_gate_begin(&resume_gate);
                     raop_rtp_mirror->callbacks.video_pause(raop_rtp_mirror->callbacks.cls);
                 } else if (video_stream_suspended && (packet[6] == 0x16 || packet[6] == 0x1e)) {
+                    mirror_resume_gate_begin(&resume_gate);
                     raop_rtp_mirror->callbacks.video_resume(raop_rtp_mirror->callbacks.cls);
                     video_stream_suspended = false;
                 }

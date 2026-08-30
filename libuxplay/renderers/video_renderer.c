@@ -669,6 +669,39 @@ void video_renderer_pause() {
     logger_log(logger, LOGGER_DEBUG, "video renderer pause: %s", gst_element_state_change_return_get_name(ret));
 }
 
+bool video_renderer_resync() {
+    if (!renderer || !renderer->pipeline) {
+        return false;
+    }
+
+    logger_log(logger, LOGGER_INFO,
+               "Resetting the video decoder for an AirPlay device resume");
+    const GstStateChangeReturn reset_result =
+        gst_element_set_state(renderer->pipeline, GST_STATE_READY);
+    if (reset_result == GST_STATE_CHANGE_FAILURE) {
+        logger_log(logger, LOGGER_WARNING,
+                   "Video decoder reset failed while entering READY state");
+        return false;
+    }
+
+    GstState state = GST_STATE_VOID_PENDING;
+    const GstStateChangeReturn wait_result = gst_element_get_state(
+        renderer->pipeline, &state, NULL, 750 * GST_MSECOND);
+    if (wait_result == GST_STATE_CHANGE_FAILURE || state != GST_STATE_READY) {
+        logger_log(logger, LOGGER_WARNING,
+                   "Video decoder reset did not reach READY state (state %s)",
+                   gst_element_state_get_name(state));
+        return false;
+    }
+
+    if (renderer->video_sink && !attach_embedded_window(renderer->video_sink)) {
+        return false;
+    }
+    first_packet = true;
+    gst_video_pipeline_base_time = GST_CLOCK_TIME_NONE;
+    return true;
+}
+
 void video_renderer_resume() {
     if (!renderer) {
         return;

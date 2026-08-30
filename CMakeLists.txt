@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(UxPlayStudio VERSION 1.1.2 LANGUAGES C CXX)
+project(UxPlayStudio VERSION 1.1.3 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -69,6 +69,11 @@ add_executable(test-streamhealth tests/test_streamhealth.cpp src/streamhealth.cp
 target_link_libraries(test-streamhealth PRIVATE Qt6::Core Qt6::Test)
 target_include_directories(test-streamhealth PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME streamhealth COMMAND test-streamhealth)
+
+add_executable(test-mirrorrecovery tests/test_mirrorrecovery.cpp)
+target_link_libraries(test-mirrorrecovery PRIVATE Qt6::Core Qt6::Test)
+target_include_directories(test-mirrorrecovery PRIVATE ${CMAKE_SOURCE_DIR}/libuxplay/lib)
+add_test(NAME mirrorrecovery COMMAND test-mirrorrecovery)
 
 add_executable(test-mainwindow
     tests/test_mainwindow.cpp

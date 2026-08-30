@@ -661,6 +661,22 @@ void MainWindow::handleReceiverEvent(const ReceiverEvent &event) {
     } else if (type == UXPLAY_EVENT_PIN_REQUIRED) {
         category = QStringLiteral("Security");
         m_sessionState->setText(QStringLiteral("Enter PIN %1 on your device").arg(event.message));
+    } else if (type == UXPLAY_EVENT_VIDEO_PAUSED) {
+        category = QStringLiteral("Stream");
+        m_streamHealthMonitor.devicePaused(m_healthClock.elapsed());
+        m_videoSurface->setStreaming(false);
+        m_videoSurface->setPlaceholderText(
+            QStringLiteral("iPad video paused"),
+            QStringLiteral("The iPad screen may be off. Video will resynchronize automatically when it wakes."));
+        updateStreamHealth();
+    } else if (type == UXPLAY_EVENT_VIDEO_RESUMING) {
+        category = QStringLiteral("Recovery");
+        m_streamHealthMonitor.deviceResumed(m_healthClock.elapsed());
+        m_videoSurface->setStreaming(false);
+        m_videoSurface->setPlaceholderText(
+            QStringLiteral("Resynchronizing iPad video…"),
+            QStringLiteral("Resetting the decoder and waiting for a clean keyframe."));
+        updateStreamHealth();
     } else if (type == UXPLAY_EVENT_WARNING) {
         category = QStringLiteral("Warning");
     } else if (type == UXPLAY_EVENT_ERROR) {
@@ -683,6 +699,9 @@ void MainWindow::handleVideoFrameDecoded() {
         if (before == StreamHealthMonitor::Health::Restoring) {
             appendActivity(QStringLiteral("Recovery"),
                            QStringLiteral("Video frames resumed after Windows was unlocked."));
+        } else if (before == StreamHealthMonitor::Health::DeviceResuming) {
+            appendActivity(QStringLiteral("Recovery"),
+                           QStringLiteral("iPad video resumed on a clean keyframe."));
         }
     }
     updateStreamHealth();
@@ -734,9 +753,9 @@ void MainWindow::performRecoveryAction(StreamHealthMonitor::Action action) {
         m_videoSurface->setStreaming(false);
         m_videoSurface->setPlaceholderText(
             QStringLiteral("Reconnecting the receiver…"),
-            QStringLiteral("Video did not resume after unlock. Restarting AirPlay once."));
+            QStringLiteral("Video did not resume after recovery. Restarting AirPlay once."));
         appendActivity(QStringLiteral("Recovery"),
-                       QStringLiteral("No video frames returned after unlock; restarting the receiver once."));
+                       QStringLiteral("No clean video frames returned; restarting the receiver once."));
         updateStreamHealth();
         restartReceiver();
     }
@@ -767,8 +786,16 @@ void MainWindow::updateStreamHealth() {
         text = QStringLiteral("PC locked · video output paused");
         color = QStringLiteral("#f6c85f");
         break;
+    case StreamHealthMonitor::Health::DevicePaused:
+        text = QStringLiteral("iPad video paused · waiting for device wake");
+        color = QStringLiteral("#f6c85f");
+        break;
     case StreamHealthMonitor::Health::Restoring:
         text = QStringLiteral("Restoring video after unlock…");
+        color = QStringLiteral("#6c8cff");
+        break;
+    case StreamHealthMonitor::Health::DeviceResuming:
+        text = QStringLiteral("iPad awake · waiting for a clean keyframe…");
         color = QStringLiteral("#6c8cff");
         break;
     case StreamHealthMonitor::Health::Reconnecting:
@@ -802,9 +829,17 @@ void MainWindow::updateStreamHealth() {
             sessionText = QStringLiteral("Video paused while PC is locked");
             badgeText = QStringLiteral("Video paused");
             break;
+        case StreamHealthMonitor::Health::DevicePaused:
+            sessionText = QStringLiteral("iPad video paused");
+            badgeText = QStringLiteral("Device sleeping");
+            break;
         case StreamHealthMonitor::Health::Restoring:
             sessionText = QStringLiteral("Restoring video output");
             badgeText = QStringLiteral("Restoring video");
+            break;
+        case StreamHealthMonitor::Health::DeviceResuming:
+            sessionText = QStringLiteral("Resynchronizing iPad video");
+            badgeText = QStringLiteral("Resynchronizing");
             break;
         case StreamHealthMonitor::Health::Reconnecting:
             sessionText = QStringLiteral("Reconnecting receiver");

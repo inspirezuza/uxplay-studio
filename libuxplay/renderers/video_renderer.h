@@ -68,6 +68,7 @@ void video_renderer_hls_ready ();
 void video_renderer_seek(float position);
 void video_renderer_set_start(float position);
 void video_renderer_resume ();
+bool video_renderer_resync ();
 int video_renderer_cycle ();
 bool video_renderer_is_paused();
 bool video_renderer_eos_watch();
